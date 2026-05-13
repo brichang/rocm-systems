@@ -390,10 +390,20 @@ try {
     hipFileInit();
     (void)flags; // Unused at this time.
 
+    if (nr == 0 || iocbp == nullptr) {
+        return {hipFileInvalidValue, hipSuccess};
+    }
+
     std::shared_ptr<IBatchContext> batch_context = Context<DriverState>::get()->getBatchContext(batch_idp);
+    if (nr > batch_context->getCapacity()) {
+        return {hipFileBatchFull, hipSuccess};
+    }
     batch_context->submitOperations(iocbp, nr);
 
     return {hipFileSuccess, hipSuccess};
+}
+catch (const BatchFull &) {
+    return {hipFileBatchFull, hipSuccess};
 }
 catch (const std::invalid_argument &) {
     return {hipFileInvalidValue, hipSuccess};
