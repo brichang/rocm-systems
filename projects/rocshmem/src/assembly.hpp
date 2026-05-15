@@ -532,6 +532,7 @@ __device__ __forceinline__ void get_asm([[maybe_unused]] uint8_t* src,
 // ==============================================================================
 enum class CachePolicy {
   Standard,      // Normal C++ load/store (L1 and L2 cached)
+  FlatCache,     // Flat load/store with L1 and L2 caching 
   BypassL1,      // Bypass L1 (sc0 / glc / scope:DEV)
   NonTemporal,   // Streaming data (nt / glc slc)
   SystemScope,   // Bypass L1 and L2 (sc0 sc1 / glc slc / scope:SYS)
@@ -555,7 +556,9 @@ struct AsmAccess<16, LoadPolicy, StorePolicy> {
     } else {
       type val{};
 #if defined(__gfx942__) || defined(__gfx950__)
-      if constexpr (LoadPolicy == CachePolicy::BypassL1) {
+      if constexpr (LoadPolicy == CachePolicy::FlatCache) {
+        asm volatile("flat_load_dwordx4 %0, %1" : "=v"(val) : "v"(src) : "memory");
+      } else if constexpr (LoadPolicy == CachePolicy::BypassL1) {
         asm volatile("flat_load_dwordx4 %0, %1, sc0" : "=v"(val) : "v"(src) : "memory");
       } else if constexpr (LoadPolicy == CachePolicy::NonTemporal) {
         asm volatile("flat_load_dwordx4 %0, %1, nt" : "=v"(val) : "v"(src) : "memory");
@@ -565,13 +568,17 @@ struct AsmAccess<16, LoadPolicy, StorePolicy> {
         asm volatile("flat_load_dwordx4 %0, %1, sc0 sc1 nt" : "=v"(val) : "v"(src) : "memory");
       }
 #elif defined(__gfx90a__) || defined(__gfx1100__)
-      if constexpr (LoadPolicy == CachePolicy::BypassL1) {
+      if constexpr (LoadPolicy == CachePolicy::FlatCache) {
+        asm volatile("flat_load_dwordx4 %0, %1" : "=v"(val) : "v"(src) : "memory");
+      } else if constexpr (LoadPolicy == CachePolicy::BypassL1) {
         asm volatile("flat_load_dwordx4 %0, %1, glc" : "=v"(val) : "v"(src) : "memory");
       } else {
         asm volatile("flat_load_dwordx4 %0, %1, glc slc" : "=v"(val) : "v"(src) : "memory");
       }
 #elif defined(__gfx1201__)
-      if constexpr (LoadPolicy == CachePolicy::BypassL1) {
+      if constexpr (LoadPolicy == CachePolicy::FlatCache) {
+        asm volatile("flat_load_b128 %0, %1, scope:SCOPE_SE" : "=v"(val) : "v"(src) : "memory");
+      } else if constexpr (LoadPolicy == CachePolicy::BypassL1) {
         asm volatile("flat_load_b128 %0, %1, scope:SCOPE_DEV" : "=v"(val) : "v"(src) : "memory");
       } else {
         asm volatile("flat_load_b128 %0, %1, scope:SCOPE_SYS" : "=v"(val) : "v"(src) : "memory");
@@ -588,7 +595,9 @@ struct AsmAccess<16, LoadPolicy, StorePolicy> {
       *reinterpret_cast<type*>(dst) = val;
     } else {
 #if defined(__gfx942__) || defined(__gfx950__)
-      if constexpr (StorePolicy == CachePolicy::BypassL1) {
+      if constexpr (StorePolicy == CachePolicy::FlatCache) {
+        asm volatile("flat_store_dwordx4 %0, %1" : : "v"(dst), "v"(val) : "memory");
+      } else if constexpr (StorePolicy == CachePolicy::BypassL1) {
         asm volatile("flat_store_dwordx4 %0, %1, sc0" : : "v"(dst), "v"(val) : "memory");
       } else if constexpr (StorePolicy == CachePolicy::NonTemporal) {
         asm volatile("flat_store_dwordx4 %0, %1, nt" : : "v"(dst), "v"(val) : "memory");
@@ -598,13 +607,17 @@ struct AsmAccess<16, LoadPolicy, StorePolicy> {
         asm volatile("flat_store_dwordx4 %0, %1, sc0 sc1 nt" : : "v"(dst), "v"(val) : "memory");
       }
 #elif defined(__gfx90a__) || defined(__gfx1100__)
-      if constexpr (StorePolicy == CachePolicy::BypassL1) {
+      if constexpr (StorePolicy == CachePolicy::FlatCache) {
+        asm volatile("flat_store_dwordx4 %0, %1" : : "v"(dst), "v"(val) : "memory");
+      } else if constexpr (StorePolicy == CachePolicy::BypassL1) {
         asm volatile("flat_store_dwordx4 %0, %1, glc" : : "v"(dst), "v"(val) : "memory");
       } else {
         asm volatile("flat_store_dwordx4 %0, %1, glc slc" : : "v"(dst), "v"(val) : "memory");
       }
 #elif defined(__gfx1201__)
-      if constexpr (StorePolicy == CachePolicy::BypassL1) {
+      if constexpr (StorePolicy == CachePolicy::FlatCache) {
+        asm volatile("flat_store_b128 %0, %1, scope:SCOPE_SE" : : "v"(dst), "v"(val) : "memory");
+      } else if constexpr (StorePolicy == CachePolicy::BypassL1) {
         asm volatile("flat_store_b128 %0, %1, scope:SCOPE_DEV" : : "v"(dst), "v"(val) : "memory");
       } else {
         asm volatile("flat_store_b128 %0, %1, scope:SCOPE_SYS" : : "v"(dst), "v"(val) : "memory");
@@ -629,7 +642,9 @@ struct AsmAccess<8, LoadPolicy, StorePolicy> {
     } else {
       type val{};
 #if defined(__gfx942__) || defined(__gfx950__)
-      if constexpr (LoadPolicy == CachePolicy::BypassL1) {
+      if constexpr (LoadPolicy == CachePolicy::FlatCache) {
+        asm volatile("flat_load_dwordx2 %0, %1" : "=v"(val) : "v"(src) : "memory");
+      } else if constexpr (LoadPolicy == CachePolicy::BypassL1) {
         asm volatile("flat_load_dwordx2 %0, %1, sc0" : "=v"(val) : "v"(src) : "memory");
       } else if constexpr (LoadPolicy == CachePolicy::NonTemporal) {
         asm volatile("flat_load_dwordx2 %0, %1, nt" : "=v"(val) : "v"(src) : "memory");
@@ -639,13 +654,17 @@ struct AsmAccess<8, LoadPolicy, StorePolicy> {
         asm volatile("flat_load_dwordx2 %0, %1, sc0 sc1 nt" : "=v"(val) : "v"(src) : "memory");
       }
 #elif defined(__gfx90a__) || defined(__gfx1100__)
-      if constexpr (LoadPolicy == CachePolicy::BypassL1) {
+      if constexpr (LoadPolicy == CachePolicy::FlatCache) {
+        asm volatile("flat_load_dwordx2 %0, %1" : "=v"(val) : "v"(src) : "memory");
+      } else if constexpr (LoadPolicy == CachePolicy::BypassL1) {
         asm volatile("flat_load_dwordx2 %0, %1, glc" : "=v"(val) : "v"(src) : "memory");
       } else {
         asm volatile("flat_load_dwordx2 %0, %1, glc slc" : "=v"(val) : "v"(src) : "memory");
       }
 #elif defined(__gfx1201__)
-      if constexpr (LoadPolicy == CachePolicy::BypassL1) {
+      if constexpr (LoadPolicy == CachePolicy::FlatCache) {
+        asm volatile("flat_load_b64 %0, %1, scope:SCOPE_SE" : "=v"(val) : "v"(src) : "memory");
+      } else if constexpr (LoadPolicy == CachePolicy::BypassL1) {
         asm volatile("flat_load_b64 %0, %1, scope:SCOPE_DEV" : "=v"(val) : "v"(src) : "memory");
       } else {
         asm volatile("flat_load_b64 %0, %1, scope:SCOPE_SYS" : "=v"(val) : "v"(src) : "memory");
@@ -662,7 +681,9 @@ struct AsmAccess<8, LoadPolicy, StorePolicy> {
       *reinterpret_cast<type*>(dst) = val;
     } else {
 #if defined(__gfx942__) || defined(__gfx950__)
-      if constexpr (StorePolicy == CachePolicy::BypassL1) {
+      if constexpr (StorePolicy == CachePolicy::FlatCache) {
+        asm volatile("flat_store_dwordx2 %0, %1" : : "v"(dst), "v"(val) : "memory");
+      } else if constexpr (StorePolicy == CachePolicy::BypassL1) {
         asm volatile("flat_store_dwordx2 %0, %1, sc0" : : "v"(dst), "v"(val) : "memory");
       } else if constexpr (StorePolicy == CachePolicy::NonTemporal) {
         asm volatile("flat_store_dwordx2 %0, %1, nt" : : "v"(dst), "v"(val) : "memory");
@@ -672,13 +693,17 @@ struct AsmAccess<8, LoadPolicy, StorePolicy> {
         asm volatile("flat_store_dwordx2 %0, %1, sc0 sc1 nt" : : "v"(dst), "v"(val) : "memory");
       }
 #elif defined(__gfx90a__) || defined(__gfx1100__)
-      if constexpr (StorePolicy == CachePolicy::BypassL1) {
+      if constexpr (StorePolicy == CachePolicy::FlatCache) {
+        asm volatile("flat_store_dwordx2 %0, %1" : : "v"(dst), "v"(val) : "memory");
+      } else if constexpr (StorePolicy == CachePolicy::BypassL1) {
         asm volatile("flat_store_dwordx2 %0, %1, glc" : : "v"(dst), "v"(val) : "memory");
       } else {
         asm volatile("flat_store_dwordx2 %0, %1, glc slc" : : "v"(dst), "v"(val) : "memory");
       }
 #elif defined(__gfx1201__)
-      if constexpr (StorePolicy == CachePolicy::BypassL1) {
+      if constexpr (StorePolicy == CachePolicy::FlatCache) {
+        asm volatile("flat_store_b64 %0, %1, scope:SCOPE_SE" : : "v"(dst), "v"(val) : "memory");
+      } else if constexpr (StorePolicy == CachePolicy::BypassL1) {
         asm volatile("flat_store_b64 %0, %1, scope:SCOPE_DEV" : : "v"(dst), "v"(val) : "memory");
       } else {
         asm volatile("flat_store_b64 %0, %1, scope:SCOPE_SYS" : : "v"(dst), "v"(val) : "memory");
@@ -703,7 +728,9 @@ struct AsmAccess<4, LoadPolicy, StorePolicy> {
     } else {
       type val{};
 #if defined(__gfx942__) || defined(__gfx950__)
-      if constexpr (LoadPolicy == CachePolicy::BypassL1) {
+      if constexpr (LoadPolicy == CachePolicy::FlatCache) {
+        asm volatile("flat_load_dword %0, %1" : "=v"(val) : "v"(src) : "memory");
+      } else if constexpr (LoadPolicy == CachePolicy::BypassL1) {
         asm volatile("flat_load_dword %0, %1, sc0" : "=v"(val) : "v"(src) : "memory");
       } else if constexpr (LoadPolicy == CachePolicy::NonTemporal) {
         asm volatile("flat_load_dword %0, %1, nt" : "=v"(val) : "v"(src) : "memory");
@@ -713,13 +740,17 @@ struct AsmAccess<4, LoadPolicy, StorePolicy> {
         asm volatile("flat_load_dword %0, %1, sc0 sc1 nt" : "=v"(val) : "v"(src) : "memory");
       }
 #elif defined(__gfx90a__) || defined(__gfx1100__)
-      if constexpr (LoadPolicy == CachePolicy::BypassL1) {
+      if constexpr (LoadPolicy == CachePolicy::FlatCache) {
+        asm volatile("flat_load_dword %0, %1" : "=v"(val) : "v"(src) : "memory");
+      } else if constexpr (LoadPolicy == CachePolicy::BypassL1) {
         asm volatile("flat_load_dword %0, %1, glc" : "=v"(val) : "v"(src) : "memory");
       } else {
         asm volatile("flat_load_dword %0, %1, glc slc" : "=v"(val) : "v"(src) : "memory");
       }
 #elif defined(__gfx1201__)
-      if constexpr (LoadPolicy == CachePolicy::BypassL1) {
+      if constexpr (LoadPolicy == CachePolicy::FlatCache) {
+        asm volatile("flat_load_b32 %0, %1, scope:SCOPE_SE" : "=v"(val) : "v"(src) : "memory");
+      } else if constexpr (LoadPolicy == CachePolicy::BypassL1) {
         asm volatile("flat_load_b32 %0, %1, scope:SCOPE_DEV" : "=v"(val) : "v"(src) : "memory");
       } else {
         asm volatile("flat_load_b32 %0, %1, scope:SCOPE_SYS" : "=v"(val) : "v"(src) : "memory");
@@ -736,7 +767,9 @@ struct AsmAccess<4, LoadPolicy, StorePolicy> {
       *reinterpret_cast<type*>(dst) = val;
     } else {
 #if defined(__gfx942__) || defined(__gfx950__)
-      if constexpr (StorePolicy == CachePolicy::BypassL1) {
+      if constexpr (StorePolicy == CachePolicy::FlatCache) {
+        asm volatile("flat_store_dword %0, %1" : : "v"(dst), "v"(val) : "memory");
+      } else if constexpr (StorePolicy == CachePolicy::BypassL1) {
         asm volatile("flat_store_dword %0, %1, sc0" : : "v"(dst), "v"(val) : "memory");
       } else if constexpr (StorePolicy == CachePolicy::NonTemporal) {
         asm volatile("flat_store_dword %0, %1, nt" : : "v"(dst), "v"(val) : "memory");
@@ -746,13 +779,17 @@ struct AsmAccess<4, LoadPolicy, StorePolicy> {
         asm volatile("flat_store_dword %0, %1, sc0 sc1 nt" : : "v"(dst), "v"(val) : "memory");
       }
 #elif defined(__gfx90a__) || defined(__gfx1100__)
-      if constexpr (StorePolicy == CachePolicy::BypassL1) {
+      if constexpr (StorePolicy == CachePolicy::FlatCache) {
+        asm volatile("flat_store_dword %0, %1" : : "v"(dst), "v"(val) : "memory");
+      } else if constexpr (StorePolicy == CachePolicy::BypassL1) {
         asm volatile("flat_store_dword %0, %1, glc" : : "v"(dst), "v"(val) : "memory");
       } else {
         asm volatile("flat_store_dword %0, %1, glc slc" : : "v"(dst), "v"(val) : "memory");
       }
 #elif defined(__gfx1201__)
-      if constexpr (StorePolicy == CachePolicy::BypassL1) {
+      if constexpr (StorePolicy == CachePolicy::FlatCache) {
+        asm volatile("flat_store_b32 %0, %1, scope:SCOPE_SE" : : "v"(dst), "v"(val) : "memory");
+      } else if constexpr (StorePolicy == CachePolicy::BypassL1) {
         asm volatile("flat_store_b32 %0, %1, scope:SCOPE_DEV" : : "v"(dst), "v"(val) : "memory");
       } else {
         asm volatile("flat_store_b32 %0, %1, scope:SCOPE_SYS" : : "v"(dst), "v"(val) : "memory");
@@ -778,7 +815,9 @@ struct AsmAccess<2, LoadPolicy, StorePolicy> {
 #if defined(__gfx942__) || defined(__gfx950__) || defined(__gfx90a__)
       int16_t val{};  // Gfx9 supports native 16-bit vector registers
   #if defined(__gfx942__) || defined(__gfx950__)
-      if constexpr (LoadPolicy == CachePolicy::BypassL1) {
+      if constexpr (LoadPolicy == CachePolicy::FlatCache) {
+        asm volatile("flat_load_ushort %0, %1" : "=v"(val) : "v"(src) : "memory");
+      } else if constexpr (LoadPolicy == CachePolicy::BypassL1) {
         asm volatile("flat_load_ushort %0, %1, sc0" : "=v"(val) : "v"(src) : "memory");
       } else if constexpr (LoadPolicy == CachePolicy::NonTemporal) {
         asm volatile("flat_load_ushort %0, %1, nt" : "=v"(val) : "v"(src) : "memory");
@@ -788,7 +827,9 @@ struct AsmAccess<2, LoadPolicy, StorePolicy> {
         asm volatile("flat_load_ushort %0, %1, sc0 sc1 nt" : "=v"(val) : "v"(src) : "memory");
       }
   #else
-      if constexpr (LoadPolicy == CachePolicy::BypassL1) {
+      if constexpr (LoadPolicy == CachePolicy::FlatCache) {
+        asm volatile("flat_load_ushort %0, %1" : "=v"(val) : "v"(src) : "memory");
+      } else if constexpr (LoadPolicy == CachePolicy::BypassL1) {
         asm volatile("flat_load_ushort %0, %1, glc" : "=v"(val) : "v"(src) : "memory");
       } else {
         asm volatile("flat_load_ushort %0, %1, glc slc" : "=v"(val) : "v"(src) : "memory");
@@ -798,13 +839,17 @@ struct AsmAccess<2, LoadPolicy, StorePolicy> {
 #elif defined(__gfx1100__) || defined(__gfx1201__)
       int32_t val32;  // Gfx11/12 forces 16-bit ops into 32-bit registers
   #if defined(__gfx1100__)
-      if constexpr (LoadPolicy == CachePolicy::BypassL1) {
+      if constexpr (LoadPolicy == CachePolicy::FlatCache) {
+        asm volatile("flat_load_ushort %0, %1" : "=v"(val32) : "v"(src) : "memory");
+      } else if constexpr (LoadPolicy == CachePolicy::BypassL1) {
         asm volatile("flat_load_ushort %0, %1, glc" : "=v"(val32) : "v"(src) : "memory");
       } else {
         asm volatile("flat_load_ushort %0, %1, glc slc" : "=v"(val32) : "v"(src) : "memory");
       }
   #else
-      if constexpr (LoadPolicy == CachePolicy::BypassL1) {
+      if constexpr (LoadPolicy == CachePolicy::FlatCache) {
+        asm volatile("flat_load_u16 %0, %1, scope:SCOPE_SE" : "=v"(val32) : "v"(src) : "memory");
+      } else if constexpr (LoadPolicy == CachePolicy::BypassL1) {
         asm volatile("flat_load_u16 %0, %1, scope:SCOPE_DEV" : "=v"(val32) : "v"(src) : "memory");
       } else {
         asm volatile("flat_load_u16 %0, %1, scope:SCOPE_SYS" : "=v"(val32) : "v"(src) : "memory");
@@ -824,7 +869,9 @@ struct AsmAccess<2, LoadPolicy, StorePolicy> {
 #if defined(__gfx942__) || defined(__gfx950__) || defined(__gfx90a__)
       int16_t val16 = val;
   #if defined(__gfx942__) || defined(__gfx950__)
-      if constexpr (StorePolicy == CachePolicy::BypassL1) {
+      if constexpr (StorePolicy == CachePolicy::FlatCache) {
+        asm volatile("flat_store_short %0, %1" : : "v"(dst), "v"(val16) : "memory");
+      } else if constexpr (StorePolicy == CachePolicy::BypassL1) {
         asm volatile("flat_store_short %0, %1, sc0" : : "v"(dst), "v"(val16) : "memory");
       } else if constexpr (StorePolicy == CachePolicy::NonTemporal) {
         asm volatile("flat_store_short %0, %1, nt" : : "v"(dst), "v"(val16) : "memory");
@@ -834,7 +881,9 @@ struct AsmAccess<2, LoadPolicy, StorePolicy> {
         asm volatile("flat_store_short %0, %1, sc0 sc1 nt" : : "v"(dst), "v"(val16) : "memory");
       }
   #else
-      if constexpr (StorePolicy == CachePolicy::BypassL1) {
+      if constexpr (StorePolicy == CachePolicy::FlatCache) {
+        asm volatile("flat_store_short %0, %1" : : "v"(dst), "v"(val16) : "memory");
+      } else if constexpr (StorePolicy == CachePolicy::BypassL1) {
         asm volatile("flat_store_short %0, %1, glc" : : "v"(dst), "v"(val16) : "memory");
       } else {
         asm volatile("flat_store_short %0, %1, glc slc" : : "v"(dst), "v"(val16) : "memory");
@@ -843,13 +892,17 @@ struct AsmAccess<2, LoadPolicy, StorePolicy> {
 #elif defined(__gfx1100__) || defined(__gfx1201__)
       int32_t val32 = static_cast<int32_t>(val);
   #if defined(__gfx1100__)
-      if constexpr (StorePolicy == CachePolicy::BypassL1) {
+      if constexpr (StorePolicy == CachePolicy::FlatCache) {
+        asm volatile("flat_store_short %0, %1" : : "v"(dst), "v"(val32) : "memory");
+      } else if constexpr (StorePolicy == CachePolicy::BypassL1) {
         asm volatile("flat_store_short %0, %1, glc" : : "v"(dst), "v"(val32) : "memory");
       } else {
         asm volatile("flat_store_short %0, %1, glc slc" : : "v"(dst), "v"(val32) : "memory");
       }
   #else
-      if constexpr (StorePolicy == CachePolicy::BypassL1) {
+      if constexpr (StorePolicy == CachePolicy::FlatCache) {
+        asm volatile("flat_store_b16 %0, %1, scope:SCOPE_SE" : : "v"(dst), "v"(val32) : "memory");
+      } else if constexpr (StorePolicy == CachePolicy::BypassL1) {
         asm volatile("flat_store_b16 %0, %1, scope:SCOPE_DEV" : : "v"(dst), "v"(val32) : "memory");
       } else {
         asm volatile("flat_store_b16 %0, %1, scope:SCOPE_SYS" : : "v"(dst), "v"(val32) : "memory");
@@ -876,7 +929,9 @@ struct AsmAccess<1, LoadPolicy, StorePolicy> {
 #if defined(__gfx942__) || defined(__gfx950__) || defined(__gfx90a__)
       int16_t val{};  // Gfx9 loads bytes into 16-bit registers minimum
   #if defined(__gfx942__) || defined(__gfx950__)
-      if constexpr (LoadPolicy == CachePolicy::BypassL1) {
+      if constexpr (LoadPolicy == CachePolicy::FlatCache) {
+        asm volatile("flat_load_ubyte %0, %1" : "=v"(val) : "v"(src) : "memory");
+      } else if constexpr (LoadPolicy == CachePolicy::BypassL1) {
         asm volatile("flat_load_ubyte %0, %1, sc0" : "=v"(val) : "v"(src) : "memory");
       } else if constexpr (LoadPolicy == CachePolicy::NonTemporal) {
         asm volatile("flat_load_ubyte %0, %1, nt" : "=v"(val) : "v"(src) : "memory");
@@ -886,7 +941,9 @@ struct AsmAccess<1, LoadPolicy, StorePolicy> {
         asm volatile("flat_load_ubyte %0, %1, sc0 sc1 nt" : "=v"(val) : "v"(src) : "memory");
       }
   #else
-      if constexpr (LoadPolicy == CachePolicy::BypassL1) {
+      if constexpr (LoadPolicy == CachePolicy::FlatCache) {
+        asm volatile("flat_load_ubyte %0, %1" : "=v"(val) : "v"(src) : "memory");
+      } else if constexpr (LoadPolicy == CachePolicy::BypassL1) {
         asm volatile("flat_load_ubyte %0, %1, glc" : "=v"(val) : "v"(src) : "memory");
       } else {
         asm volatile("flat_load_ubyte %0, %1, glc slc" : "=v"(val) : "v"(src) : "memory");
@@ -896,13 +953,17 @@ struct AsmAccess<1, LoadPolicy, StorePolicy> {
 #elif defined(__gfx1100__) || defined(__gfx1201__)
       int32_t val32{};  // Gfx11/12 forces 8-bit ops into 32-bit registers
   #if defined(__gfx1100__)
-      if constexpr (LoadPolicy == CachePolicy::BypassL1) {
+      if constexpr (LoadPolicy == CachePolicy::FlatCache) {
+        asm volatile("flat_load_ubyte %0, %1" : "=v"(val32) : "v"(src) : "memory");
+      } else if constexpr (LoadPolicy == CachePolicy::BypassL1) {
         asm volatile("flat_load_ubyte %0, %1, glc" : "=v"(val32) : "v"(src) : "memory");
       } else {
         asm volatile("flat_load_ubyte %0, %1, glc slc" : "=v"(val32) : "v"(src) : "memory");
       }
   #else
-      if constexpr (LoadPolicy == CachePolicy::BypassL1) {
+      if constexpr (LoadPolicy == CachePolicy::FlatCache) {
+        asm volatile("flat_load_u8 %0, %1, scope:SCOPE_SE" : "=v"(val32) : "v"(src) : "memory");
+      } else if constexpr (LoadPolicy == CachePolicy::BypassL1) {
         asm volatile("flat_load_u8 %0, %1, scope:SCOPE_DEV" : "=v"(val32) : "v"(src) : "memory");
       } else {
         asm volatile("flat_load_u8 %0, %1, scope:SCOPE_SYS" : "=v"(val32) : "v"(src) : "memory");
@@ -922,7 +983,9 @@ struct AsmAccess<1, LoadPolicy, StorePolicy> {
 #if defined(__gfx942__) || defined(__gfx950__) || defined(__gfx90a__)
       int16_t val16 = static_cast<int16_t>(val);
   #if defined(__gfx942__) || defined(__gfx950__)
-      if constexpr (StorePolicy == CachePolicy::BypassL1) {
+      if constexpr (StorePolicy == CachePolicy::FlatCache) {
+        asm volatile("flat_store_byte %0, %1" : : "v"(dst), "v"(val16) : "memory");
+      } else if constexpr (StorePolicy == CachePolicy::BypassL1) {
         asm volatile("flat_store_byte %0, %1, sc0" : : "v"(dst), "v"(val16) : "memory");
       } else if constexpr (StorePolicy == CachePolicy::NonTemporal) {
         asm volatile("flat_store_byte %0, %1, nt" : : "v"(dst), "v"(val16) : "memory");
@@ -932,7 +995,9 @@ struct AsmAccess<1, LoadPolicy, StorePolicy> {
         asm volatile("flat_store_byte %0, %1, sc0 sc1 nt" : : "v"(dst), "v"(val16) : "memory");
       }
   #else
-      if constexpr (StorePolicy == CachePolicy::BypassL1) {
+      if constexpr (StorePolicy == CachePolicy::FlatCache) {
+        asm volatile("flat_store_byte %0, %1" : : "v"(dst), "v"(val16) : "memory");
+      } else if constexpr (StorePolicy == CachePolicy::BypassL1) {
         asm volatile("flat_store_byte %0, %1, glc" : : "v"(dst), "v"(val16) : "memory");
       } else {
         asm volatile("flat_store_byte %0, %1, glc slc" : : "v"(dst), "v"(val16) : "memory");
@@ -941,13 +1006,17 @@ struct AsmAccess<1, LoadPolicy, StorePolicy> {
 #elif defined(__gfx1100__) || defined(__gfx1201__)
       int32_t val32 = static_cast<int32_t>(val);
   #if defined(__gfx1100__)
-      if constexpr (StorePolicy == CachePolicy::BypassL1) {
+      if constexpr (StorePolicy == CachePolicy::FlatCache) {
+        asm volatile("flat_store_byte %0, %1" : : "v"(dst), "v"(val32) : "memory");
+      } else if constexpr (StorePolicy == CachePolicy::BypassL1) {
         asm volatile("flat_store_byte %0, %1, glc" : : "v"(dst), "v"(val32) : "memory");
       } else {
         asm volatile("flat_store_byte %0, %1, glc slc" : : "v"(dst), "v"(val32) : "memory");
       }
   #else
-      if constexpr (StorePolicy == CachePolicy::BypassL1) {
+      if constexpr (StorePolicy == CachePolicy::FlatCache) {
+        asm volatile("flat_store_b8 %0, %1, scope:SCOPE_SE" : : "v"(dst), "v"(val32) : "memory");
+      } else if constexpr (StorePolicy == CachePolicy::BypassL1) {
         asm volatile("flat_store_b8 %0, %1, scope:SCOPE_DEV" : : "v"(dst), "v"(val32) : "memory");
       } else {
         asm volatile("flat_store_b8 %0, %1, scope:SCOPE_SYS" : : "v"(dst), "v"(val32) : "memory");
