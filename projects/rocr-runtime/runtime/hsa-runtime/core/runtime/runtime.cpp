@@ -3527,9 +3527,8 @@ hsa_status_t Runtime::SvmBatchDiscard(void** ptrs, size_t* sizes, uint32_t count
         // Already on a CPU agent; skip prefetch for this region
         op->target_cpus.push_back(UINT32_MAX);
         continue;
-      } else if (agent->device_type() == core::Agent::kAmdGpuDevice) {
-        AMD::GpuAgent* gpu = static_cast<AMD::GpuAgent*>(agent);
-        cpu = static_cast<AMD::CpuAgent*>(gpu->GetNearestCpuAgent());
+      } else {
+        cpu = static_cast<AMD::CpuAgent*>(agent->GetNearestCpuAgent());
       }
     }
 
@@ -4023,7 +4022,7 @@ Runtime::MappedHandle::MappedHandle(MemoryHandle *mem_handle, AddressHandle *add
   if (core::Runtime::runtime_singleton_->thunkLoader()->IsDXG()) return;
   #endif
 
-  auto cpu_agent = static_cast<AMD::GpuAgent*>(agentOwner())->GetNearestCpuAgent();
+  auto cpu_agent = agentOwner()->GetNearestCpuAgent();
   auto agentPermsIt = allowed_agents.emplace(std::piecewise_construct,
                       std::forward_as_tuple(cpu_agent),
                       std::forward_as_tuple(this, cpu_agent, va,

@@ -399,7 +399,7 @@ class GpuAgent : public GpuAgentInt {
 
   hsa_status_t Preload(uint64_t flags);
 
-  core::Agent* GetNearestCpuAgent(void) const;
+  core::Agent* GetNearestCpuAgent() const override;
 
   void RegisterGangPeer(core::Agent& gang_peer, unsigned int bandwidth_factor) override;
 
@@ -773,7 +773,7 @@ class GpuAgent : public GpuAgentInt {
   // @brief Initialize scratch handler thresholds
   void InitAsyncScratchThresholds();
 
-  // @brief Initialize Secondary CUID for GPU device that 
+  // @brief Initialize Secondary CUID for GPU device that
   // this agent is running on.
   void InitDerivedCuid() override;
 
