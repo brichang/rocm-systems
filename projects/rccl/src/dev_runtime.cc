@@ -11,8 +11,10 @@
 #include "group.h"
 #include "nccl_device.h"
 #include "rma/rma_proxy.h"
+#include "nccl_merge_stubs.h"
 
 NCCL_PARAM(WinStride, "WIN_STRIDE", -1);
+NCCL_PARAM(LsaTeamSize, "LSA_TEAM_SIZE", 0);
 
 // Complete types from src/include/dev_runtime.h
 struct ncclDevrMemory {
@@ -1053,6 +1055,23 @@ ncclResult_t ncclDevrFindWindow(
   }
   return ncclSuccess;
 }
+
+bool ncclDevrIsOneLsaTeam(struct ncclComm* comm) {
+  int lsaSize = computeLsaSize(comm);
+  return lsaSize == comm->nRanks;
+}
+
+ncclResult_t ncclDevrWorldToLsaRank(struct ncclComm* comm, int peerWorldRank, int* peerLsaRank) {
+  ncclTeam_t worldTeam = ncclTeamWorld(comm);
+  ncclTeam_t lsaTeam = ncclTeamLsa(comm);
+  if (!ncclTeamRankIsMember(lsaTeam, worldTeam, peerWorldRank)) {
+    WARN("ncclDevrWorldToLsaRank: world rank %d is not a member of the LSA team", peerWorldRank);
+    return ncclInternalError;
+  }
+  *peerLsaRank = ncclTeamRankToTeam(lsaTeam, worldTeam, peerWorldRank);
+  return ncclSuccess;
+}
+
 
 NCCL_API(ncclResult_t, ncclDevCommCreate, ncclComm_t comm, ncclDevCommRequirements_t const* reqs, ncclDevComm_t* outDevComm);
 ncclResult_t ncclDevCommCreate(

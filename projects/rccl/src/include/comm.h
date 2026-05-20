@@ -813,6 +813,7 @@ struct ncclComm {
 
   // RMA state
   struct ncclRmaState rmaState;
+  struct ncclIntruQueue<struct ncclRmaCeInitTask, &ncclRmaCeInitTask::next> rmaCeInitTaskQueue;
 
   // CE Collective
   struct ncclCeColl ceColl;

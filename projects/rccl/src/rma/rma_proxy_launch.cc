@@ -45,7 +45,7 @@ ncclResult_t ncclCuStreamBatchMemOp(hipStream_t stream, unsigned int numOps, hip
     }
   }
 #endif
-	
+
 exit:
   return ret;
 fail:

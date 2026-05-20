@@ -2202,9 +2202,7 @@ static ncclResult_t initTransportsRank(struct ncclComm* comm, struct ncclComm* p
   comm->devrState.bigSize = 0;
   
   comm->globalRmaProxySupport = globalRmaPluginSupport && globalCrossNicSupport && !globalNicFused && globalCuMemGdrSupport;
-#ifdef  RCCL_RMA_CU_PATH_ENABLED
   isOneLsaTeams = ncclDevrIsOneLsaTeam(comm);
-#endif
   // Fix 1: store fully-reduced globalGinSupport bool into the comm field
   comm->globalGinSupport = globalGinSupport ? NCCL_GIN_CONNECTION_FULL : NCCL_GIN_CONNECTION_NONE;
   comm->symmetricSupport = comm->isAllCudaP2p && ncclParamWinEnable() && ncclCuMemEnable() && (comm->globalGinSupport != NCCL_GIN_CONNECTION_NONE || isOneLsaTeams);

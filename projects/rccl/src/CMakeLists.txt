@@ -176,6 +176,7 @@ set(SRC_FILES
   include/plugin/gin/gin_v12.h
   include/plugin/gin/gin_v13.h
   include/rma/rma.h
+  include/rma/rma_ce.h
   include/rma/rma_proxy.h
   include/gin.h
   include/gin/gin_host.h

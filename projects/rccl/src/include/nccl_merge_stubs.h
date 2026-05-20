@@ -12,10 +12,17 @@
 #ifndef NCCL_MERGE_STUBS_H_
 #define NCCL_MERGE_STUBS_H_
 
-#define NCCL_DESTROY NCCL_INIT
-
 #include <dlfcn.h>
 #include <unistd.h>
+#include <atomic>
+#ifdef __cplusplus
+#include <thread>
+#include <cstdio>
+#include <cstdarg>
+#endif
+#include "comm.h"
+
+#define NCCL_DESTROY NCCL_INIT
 
 typedef void* ncclOsLibraryHandle;
 static inline void* ncclOsDlsym(ncclOsLibraryHandle handle, const char* symbol) {
@@ -23,7 +30,6 @@ static inline void* ncclOsDlsym(ncclOsLibraryHandle handle, const char* symbol) 
 }
 
 // GCC implementations of compiler.h atomics (NCCL-only header, not yet ported to RCCL)
-#include <atomic>
 #define NCCL_CONVERT_ORDER(order) \
   ((order) == std::memory_order_relaxed ? __ATOMIC_RELAXED : \
    (order) == std::memory_order_consume ? __ATOMIC_CONSUME : \
@@ -76,7 +82,7 @@ static inline size_t ncclOsGetPageSize() {
 }
 #endif
 
-// RCCL stubs for ncclDevrWindow query functions — multi-segment and sysmem
+// RCCL stubs for ncclDevrWindow query functions: multi-segment and sysmem
 // window features are not implemented in RCCL; always return false.
 #ifndef _NCCL_DEVR_WINDOW_STUBS_
 #define _NCCL_DEVR_WINDOW_STUBS_
@@ -84,6 +90,7 @@ struct ncclDevrWindow;
 static inline bool ncclDevrWindowIsMultiSegment(struct ncclDevrWindow* /*win*/) { return false; }
 static inline bool ncclDevrWindowHasSysmemSegment(struct ncclDevrWindow* /*win*/) { return false; }
 #endif
+
 
 // RCCL: ncclTopoGetLocalGinDevs stub — GIN topo not implemented in RCCL;
 // returns device 0 with count 1 so gin_host.cc can proceed.
@@ -101,9 +108,6 @@ static inline ncclResult_t ncclTopoGetLocalGinDevs(struct ncclComm* /*comm*/, in
 // RCCL: ncclSetThreadName overload for std::thread (NCCL 2.30.4 uses std::thread,
 // RCCL's existing signature takes pthread_t)
 #ifdef __cplusplus
-#include <thread>
-#include <cstdio>
-#include <cstdarg>
 #ifndef _NCCL_SET_THREAD_NAME_STD_THREAD_
 #define _NCCL_SET_THREAD_NAME_STD_THREAD_
 // Forward decl of the pthread_t overload (defined in debug.cc)
@@ -118,5 +122,41 @@ static inline void ncclSetThreadName(std::thread& thread, const char *fmt, ...) 
 }
 #endif
 #endif // __cplusplus
+
+// Simplified gcd-of-nodes computeLsaSize. Upstream version adds a
+// p2pCrossClique / nvlDomainSize NVL-multicast branch which RCCL has no
+// equivalent for. Drop this block on upstream-sync.
+#ifndef _NCCL_DEVR_COMPUTE_LSA_SIZE_STUB_
+#define _NCCL_DEVR_COMPUTE_LSA_SIZE_STUB_
+int64_t ncclParamLsaTeamSize();
+
+static inline int ncclMergeStubGcd(int a, int b) {
+  while (b != 0) { int t = b; b = a % b; a = t; }
+  return a;
+}
+
+static inline int computeLsaSize(struct ncclComm* comm) {
+  if (comm->devrState.bigSize != 0) return comm->devrState.lsaSize;
+  int lsaSize = ncclParamLsaTeamSize();
+  int nodeSize = 1;
+  for (int r = 1; r < comm->nRanks; r++) {
+    if (comm->rankToNode[r] == comm->rankToNode[r-1]) {
+      nodeSize += 1;
+    } else {
+      lsaSize = ncclMergeStubGcd(lsaSize, nodeSize);
+      nodeSize = 1;
+    }
+  }
+  return ncclMergeStubGcd(lsaSize, nodeSize);
+}
+#endif
+
+// ncclCuStreamBatchMemOp wrapper is defined in src/rma/rma_proxy_launch.cc.
+// rma_ce.cc / ce_coll.cc also call it; expose forward decl + the HIP-equivalent
+// flag constant from this stubs header.
+ncclResult_t ncclCuStreamBatchMemOp(hipStream_t stream, unsigned int numOps, hipStreamBatchMemOpParams* batchParams);
+#ifndef CU_STREAM_WRITE_VALUE_DEFAULT
+#define CU_STREAM_WRITE_VALUE_DEFAULT 0u
+#endif
 
 #endif // NCCL_MERGE_STUBS_H_
