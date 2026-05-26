@@ -44,6 +44,10 @@ TEST(Alloc, ncclIbMallocDebugZeroSize)
     EXPECT_EQ(ptr, nullptr);
 }
 
+// ncclCuMemHostAlloc has two overloads in alloc.h gated by
+// HIP_VERSION >= 70253090: a real CU-based implementation and a legacy
+// stub that always returns ncclInternalError. Tests are split accordingly.
+#if HIP_VERSION < 70253090
 TEST(Alloc, ncclCuMemHostAlloc)
 {
     RUN_ISOLATED_TEST(
@@ -58,6 +62,28 @@ TEST(Alloc, ncclCuMemHostAlloc)
         }
     );
 }
+#else
+TEST(Alloc, ncclCuMemHostAlloc)
+{
+    RUN_ISOLATED_TEST(
+        "ncclCuMemHostAlloc",
+        []()
+        {
+            ASSERT_EQ(hipSetDevice(0), hipSuccess);
+
+            void*                           ptr    = nullptr;
+            hipMemGenericAllocationHandle_t handle = nullptr;
+            size_t                          size   = 4096;
+
+            ncclResult_t result = ncclCuMemHostAlloc(&ptr, &handle, size);
+            ASSERT_EQ(result, ncclSuccess);
+            ASSERT_NE(ptr, nullptr);
+
+            EXPECT_EQ(ncclCuMemHostFree(ptr), ncclSuccess);
+        }
+    );
+}
+#endif
 
 TEST(Alloc, ncclCuMemHostFree)
 {
