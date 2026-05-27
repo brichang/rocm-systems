@@ -24,8 +24,11 @@
 #ifdef MPI_TESTS_ENABLED
 
 #include "rccl/rccl.h"
+#include <hip/hip_runtime.h>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
+#include <vector>
 
 namespace RCCLHostApiHelpers
 {
@@ -139,55 +142,65 @@ struct NcclWindowGuard
 };
 
 // ============================================================================
-// Pattern fill / verify for fine-grain (CPU-accessible) memory
+// Pattern fill / verify (hipMemcpy staging — works on device and fine-grain)
 // ============================================================================
 
-/**
- * @brief Fill a host-accessible (fine-grain) buffer with a rank-indexed byte pattern.
- *
- * Pattern per byte i: uint8_t((senderRank + 1) * ((i % 251) + 1))
- *
- * The modulo 251 keeps values within the range that round-trips through uint8_t
- * without collision for distinct ranks.
- *
- * @param hostBuf    CPU-accessible pointer (e.g., ncclMemAlloc fine-grain buffer).
- * @param bytes      Number of bytes to fill.
- * @param senderRank MPI rank of the sender (used as part of the pattern).
- */
-inline void fillPatternBytes(void* hostBuf, size_t bytes, int senderRank)
+/** Fill buf with pattern (seed + i) % 256 via hipMemcpy staging. */
+inline void FillBuf(void* buf, size_t size, int seed)
 {
-    auto* p = static_cast<uint8_t*>(hostBuf);
-    for(size_t i = 0; i < bytes; ++i)
-    {
-        p[i] = static_cast<uint8_t>((senderRank + 1) * ((i % 251) + 1));
-    }
+    std::vector<uint8_t> tmp(size);
+    for(size_t i = 0; i < size; ++i)
+        tmp[i] = static_cast<uint8_t>((seed + i) % 256);
+    (void)hipMemcpy(buf, tmp.data(), size, hipMemcpyHostToDevice);
+    (void)hipDeviceSynchronize();
 }
 
-/**
- * @brief Verify a host-accessible (fine-grain) buffer against the rank-indexed byte pattern.
- *
- * Uses the same formula as fillPatternBytes.
- *
- * @param hostBuf    CPU-accessible pointer (e.g., ncclMemAlloc fine-grain buffer).
- * @param bytes      Number of bytes to verify.
- * @param senderRank MPI rank of the original sender (must match fill call).
- * @return true if every byte matches, false on the first mismatch.
- */
-inline bool verifyPatternBytes(const void* hostBuf, size_t bytes, int senderRank)
+/** Return true iff buf matches (seed + i) % 256 for all i. */
+inline bool VerifyBuf(const void* buf, size_t size, int seed)
 {
-    const auto* p = static_cast<const uint8_t*>(hostBuf);
-    for(size_t i = 0; i < bytes; ++i)
+    std::vector<uint8_t> staging(size);
+    if(hipMemcpy(staging.data(), buf, size, hipMemcpyDeviceToHost) != hipSuccess)
+        return false;
+    (void)hipDeviceSynchronize();
+    for(size_t i = 0; i < size; ++i)
     {
-        uint8_t expected = static_cast<uint8_t>((senderRank + 1) * ((i % 251) + 1));
-        if(p[i] != expected)
+        if(staging[i] != static_cast<uint8_t>((seed + i) % 256))
         {
             fprintf(stderr,
-                    "verifyPatternBytes: mismatch at byte %zu: expected %u got %u "
-                    "(senderRank=%d)\n",
+                    "VerifyBuf: mismatch at byte %zu: expected %u got %u (seed=%d)\n",
                     i,
-                    static_cast<unsigned>(expected),
-                    static_cast<unsigned>(p[i]),
-                    senderRank);
+                    static_cast<unsigned>((seed + i) % 256),
+                    static_cast<unsigned>(staging[i]),
+                    seed);
+            return false;
+        }
+    }
+    return true;
+}
+
+/** Fill buf with a constant sentinel byte via hipMemset. */
+inline void FillSentinel(void* buf, size_t size, uint8_t value)
+{
+    (void)hipMemset(buf, value, size);
+    (void)hipDeviceSynchronize();
+}
+
+/** Return true iff every byte in buf equals value. */
+inline bool AllSentinel(const void* buf, size_t size, uint8_t value)
+{
+    std::vector<uint8_t> staging(size);
+    if(hipMemcpy(staging.data(), buf, size, hipMemcpyDeviceToHost) != hipSuccess)
+        return false;
+    (void)hipDeviceSynchronize();
+    for(size_t i = 0; i < size; ++i)
+    {
+        if(staging[i] != value)
+        {
+            fprintf(stderr,
+                    "AllSentinel: mismatch at byte %zu: expected 0x%02x got 0x%02x\n",
+                    i,
+                    static_cast<unsigned>(value),
+                    static_cast<unsigned>(staging[i]));
             return false;
         }
     }

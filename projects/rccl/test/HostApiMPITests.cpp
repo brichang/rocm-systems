@@ -56,8 +56,6 @@
 #include <gtest/gtest.h>
 
 #include <cstdint>
-#include <cstring>
-#include <vector>
 
 using namespace MPITestConstants;
 using namespace RCCLTestGuards;
@@ -173,7 +171,7 @@ TEST_F(HostApiTest, WindowRegisterDeregister)
  * @test HostApiTest.SinglePutRank0ToRank1
  * @brief Basic ncclPutSignal (rank 0 → rank 1) + ncclWaitSignal (rank 1).
  *
- * Rank 0 fills a source buffer with fillPatternBytes, issues ncclPutSignal to
+ * Rank 0 fills a source buffer with FillBuf, issues ncclPutSignal to
  * rank 1's window.  Rank 1 issues ncclWaitSignal(opCnt=1).  After
  * hipStreamSynchronize rank 1 verifies the window buffer.
  */
@@ -209,7 +207,7 @@ TEST_F(HostApiTest, SinglePutRank0ToRank1)
     if(myRank == 0)
     {
         void* srcBuf = static_cast<uint8_t*>(winBuf) + kSendOffset;
-        fillPatternBytes(srcBuf, kTransferSize, /*senderRank=*/0);
+        FillBuf(srcBuf, kTransferSize, /*senderRank=*/0);
         putRes = ncclPutSignal(
             srcBuf, kTransferSize, ncclUint8,
             /*peer=*/1, win, /*peerWinOffset=*/kRecvOffset,
@@ -227,12 +225,18 @@ TEST_F(HostApiTest, SinglePutRank0ToRank1)
     ASSERT_MPI_EQ(ncclSuccess, waitRes);
 
     // Both ranks synchronize the stream.
-    ASSERT_MPI_EQ(hipSuccess, hipStreamSynchronize(stream));
+    {
+        hipError_t _sync_err = hipStreamSynchronize(stream);
+        if (_sync_err != hipSuccess) {
+            fprintf(stderr, "Rank %d: hipStreamSynchronize FAILED: err=%d (%s)\n",
+                myRank, (int)_sync_err, hipGetErrorString(_sync_err));
+            fflush(stderr);
+        }
+        ASSERT_MPI_EQ(hipSuccess, _sync_err);
+    }
 
-    // Rank 1: verify data landed in the recv region.
-    // ASSERT_MPI_TRUE must be called by all ranks (it contains MPI_Allreduce).
-    const void* recvBuf = static_cast<const uint8_t*>(winBuf) + kRecvOffset;
-    bool ok = (myRank != 1) || verifyPatternBytes(recvBuf, kTransferSize, /*senderRank=*/0);
+    bool ok = (myRank != 1) ||
+              VerifyBuf(static_cast<const uint8_t*>(winBuf) + kRecvOffset, kTransferSize, /*seed=*/0);
     ASSERT_MPI_TRUE(ok);
 
     TEST_INFO("P1 rank %d: SinglePutRank0ToRank1 passed.", myRank);
@@ -277,15 +281,13 @@ TEST_F(HostApiTest, PutWithNonZeroOffset)
 
     // Zero the recv region on rank 1 so stale bytes are detectable.
     if(myRank == 1)
-    {
-        memset(static_cast<uint8_t*>(winBuf) + kRecvOffset, 0, kTransferSize);
-    }
+        FillSentinel(static_cast<uint8_t*>(winBuf) + kRecvOffset, kTransferSize, 0);
 
     ncclResult_t putRes = ncclSuccess;
     if(myRank == 0)
     {
         void* srcBuf = static_cast<uint8_t*>(winBuf) + kSendOffset;
-        fillPatternBytes(srcBuf, kTransferSize, /*senderRank=*/0);
+        FillBuf(srcBuf, kTransferSize, /*senderRank=*/0);
         putRes = ncclPutSignal(
             srcBuf, kTransferSize, ncclUint8,
             /*peer=*/1, win, /*peerWinOffset=*/kRecvOffset,
@@ -304,7 +306,7 @@ TEST_F(HostApiTest, PutWithNonZeroOffset)
     ASSERT_MPI_EQ(hipSuccess, hipStreamSynchronize(stream));
 
     const uint8_t* recvBuf = static_cast<const uint8_t*>(winBuf) + kRecvOffset;
-    bool ok = (myRank != 1) || verifyPatternBytes(recvBuf, kTransferSize, /*senderRank=*/0);
+    bool ok = (myRank != 1) || VerifyBuf(recvBuf, kTransferSize, /*senderRank=*/0);
     ASSERT_MPI_TRUE(ok);
 
     TEST_INFO("P2 rank %d: PutWithNonZeroOffset passed.", myRank);
@@ -319,9 +321,7 @@ TEST_F(HostApiTest, PutWithNonZeroOffset)
  * @brief PUT 256 elements of float32, int32, and float16 and verify raw bytes.
  *
  * The test uses ncclPutSignal with the correct element type.  Verification
- * is done via fillPatternBytes / verifyPatternBytes on the raw bytes of each
- * element array, which is valid because the window buffer is CPU-accessible
- * fine-grain memory.
+ * is done via FillBuf / VerifyBuf on the raw bytes of each element array.
  */
 TEST_F(HostApiTest, PutMultipleDataTypes)
 {
@@ -372,7 +372,7 @@ TEST_F(HostApiTest, PutMultipleDataTypes)
         if(myRank == 0)
         {
             void* srcBuf = static_cast<uint8_t*>(winBuf) + kSendOffset;
-            fillPatternBytes(srcBuf, byteCount, /*senderRank=*/0);
+            FillBuf(srcBuf, byteCount, /*senderRank=*/0);
             putRes = ncclPutSignal(
                 srcBuf, kElem, types[t].type,
                 /*peer=*/1, win, types[t].recvOff,
@@ -392,7 +392,7 @@ TEST_F(HostApiTest, PutMultipleDataTypes)
 
         // ASSERT_MPI_TRUE must be called by all ranks.
         const uint8_t* base = static_cast<const uint8_t*>(winBuf);
-        bool ok = (myRank != 1) || verifyPatternBytes(base + types[t].recvOff, byteCount, /*senderRank=*/0);
+        bool ok = (myRank != 1) || VerifyBuf(base + types[t].recvOff, byteCount, /*senderRank=*/0);
         ASSERT_MPI_TRUE(ok);
 
         TEST_INFO("P3 rank %d: type[%d] (elemSz=%zu) passed.", myRank, t, types[t].elemSz);
@@ -438,9 +438,7 @@ TEST_F(HostApiTest, SignalOnlyNoData)
 
     // Rank 1: pre-fill window with sentinel before the signal.
     if(myRank == 1)
-    {
-        memset(winBuf, kSentinel, kOneMB);
-    }
+        FillSentinel(winBuf, kOneMB, kSentinel);
 
     // Rank 0: signal only (no data).
     ncclResult_t sigRes = ncclSuccess;
@@ -460,21 +458,7 @@ TEST_F(HostApiTest, SignalOnlyNoData)
     ASSERT_MPI_EQ(hipSuccess, hipStreamSynchronize(stream));
 
     // Rank 1: window must still be 0xAB throughout (no data was transferred).
-    bool allSentinel = true;
-    if(myRank == 1)
-    {
-        const uint8_t* p = static_cast<const uint8_t*>(winBuf);
-        for(size_t i = 0; i < kOneMB; ++i)
-        {
-            if(p[i] != kSentinel)
-            {
-                fprintf(stderr, "S1: sentinel check failed at byte %zu: expected 0x%02x got 0x%02x\n",
-                        i, static_cast<unsigned>(kSentinel), static_cast<unsigned>(p[i]));
-                allSentinel = false;
-                break;
-            }
-        }
-    }
+    bool allSentinel = (myRank != 1) || AllSentinel(winBuf, kOneMB, kSentinel);
     ASSERT_MPI_TRUE(allSentinel);
 
     TEST_INFO("S1 rank %d: SignalOnlyNoData passed.", myRank);
@@ -494,9 +478,8 @@ TEST_F(HostApiTest, SignalOnlyNoData)
  * Rank 1 issues ncclWaitSignal with opCnt=3.
  * After sync rank 1 verifies all three regions.
  *
- * Note: verifyPatternBytes uses senderRank as the pattern seed.  We abuse
- * this by passing synthetic "senderRank" values (10, 20, 30) that match
- * the fill calls.
+ * Note: VerifyBuf uses seed as the pattern index.  We pass synthetic seed
+ * values (10, 20, 30) to distinguish the three regions.
  */
 TEST_F(HostApiTest, WaitSignalFenceSemantics)
 {
@@ -540,7 +523,7 @@ TEST_F(HostApiTest, WaitSignalFenceSemantics)
         uint8_t* sendRegion = static_cast<uint8_t*>(winBuf) + kSendSlot;
         for(int i = 0; i < kNumPuts && putRes == ncclSuccess; ++i)
         {
-            fillPatternBytes(sendRegion, kTransferSize, seeds[i]);
+            FillBuf(sendRegion, kTransferSize, seeds[i]);
             size_t peerOff = static_cast<size_t>(i) * kTransferSize;
             putRes = ncclPutSignal(
                 sendRegion, kTransferSize, ncclUint8,
@@ -567,7 +550,7 @@ TEST_F(HostApiTest, WaitSignalFenceSemantics)
         for(int i = 0; i < kNumPuts; ++i)
         {
             size_t off = static_cast<size_t>(i) * kTransferSize;
-            if(!verifyPatternBytes(base + off, kTransferSize, seeds[i]))
+            if(!VerifyBuf(base + off, kTransferSize, seeds[i]))
             {
                 allOk = false;
                 break;
@@ -589,9 +572,8 @@ TEST_F(HostApiTest, WaitSignalFenceSemantics)
  *
  * Mirrors P1 but after hipStreamSynchronize the receiver copies the
  * fine-grain window pointer into a std::vector<uint8_t> on the host
- * (memcpy from CPU-accessible fine-grain memory) and checks bytes there.
- * This exercises that fine-grain memory is readable by the CPU without any
- * hipMemcpy.
+ * VerifyBuf copies device→host via hipMemcpy into a staging buffer and checks
+ * bytes there.
  */
 TEST_F(HostApiTest, DataVisibilityAfterSync)
 {
@@ -623,7 +605,7 @@ TEST_F(HostApiTest, DataVisibilityAfterSync)
     if(myRank == 0)
     {
         void* sendRegion = static_cast<uint8_t*>(winBuf) + kSendOffset;
-        fillPatternBytes(sendRegion, kTransferSize, 0);
+        FillBuf(sendRegion, kTransferSize, 0);
         putRes = ncclPutSignal(sendRegion, kTransferSize, ncclUint8,
                                1, win, kRecvOffset, kSigIdx, kCtx, kFlags, comm, stream);
     }
@@ -639,26 +621,8 @@ TEST_F(HostApiTest, DataVisibilityAfterSync)
 
     ASSERT_MPI_EQ(hipSuccess, hipStreamSynchronize(stream));
 
-    bool ok = true;
-    if(myRank == 1)
-    {
-        // Copy from CPU-accessible fine-grain memory into a host std::vector.
-        const uint8_t* recvRegion = static_cast<const uint8_t*>(winBuf) + kRecvOffset;
-        std::vector<uint8_t> hostCopy(kTransferSize);
-        memcpy(hostCopy.data(), recvRegion, kTransferSize);
-
-        for(size_t i = 0; i < kTransferSize; ++i)
-        {
-            uint8_t expected = static_cast<uint8_t>((0 + 1) * ((i % 251) + 1));
-            if(hostCopy[i] != expected)
-            {
-                fprintf(stderr, "O1: mismatch at byte %zu: expected %u got %u\n",
-                        i, static_cast<unsigned>(expected), static_cast<unsigned>(hostCopy[i]));
-                ok = false;
-                break;
-            }
-        }
-    }
+    bool ok = (myRank != 1) ||
+              VerifyBuf(static_cast<const uint8_t*>(winBuf) + kRecvOffset, kTransferSize, /*seed=*/0);
     ASSERT_MPI_TRUE(ok);
 
     TEST_INFO("O1 rank %d: DataVisibilityAfterSync passed.", myRank);
@@ -923,7 +887,7 @@ TEST_F(HostApiTest, SignalCumulativeFence)
     if(myRank == 0)
     {
         void* sendRegion = static_cast<uint8_t*>(winBuf) + kSendOffset;
-        fillPatternBytes(sendRegion, kSize, /*senderRank=*/0);
+        FillBuf(sendRegion, kSize, /*senderRank=*/0);
 
         sendRes = ncclGroupStart();
         if(sendRes == ncclSuccess)
@@ -953,7 +917,7 @@ TEST_F(HostApiTest, SignalCumulativeFence)
     ASSERT_MPI_EQ(hipSuccess, hipStreamSynchronize(stream));
 
     bool ok = (myRank != 1) ||
-              verifyPatternBytes(static_cast<uint8_t*>(winBuf) + kRecvOffset, kSize, /*senderRank=*/0);
+              VerifyBuf(static_cast<uint8_t*>(winBuf) + kRecvOffset, kSize, /*senderRank=*/0);
     ASSERT_MPI_TRUE(ok);
 
     TEST_INFO("S2 rank %d: SignalCumulativeFence passed.", myRank);
@@ -1007,7 +971,7 @@ TEST_F(HostApiTest, MultipleSendersOneReceiver)
     if(myRank == 0)
     {
         void* sendRegion = static_cast<uint8_t*>(winBuf) + kSendSlot;
-        fillPatternBytes(sendRegion, kSize, /*senderRank=*/0);
+        FillBuf(sendRegion, kSize, /*senderRank=*/0);
         sendRes = ncclPutSignal(sendRegion, kSize, ncclUint8,
                                 /*peer=*/2, win, /*peerWinOffset=*/0,
                                 kSigIdx, kCtx, kFlags, comm, stream);
@@ -1015,7 +979,7 @@ TEST_F(HostApiTest, MultipleSendersOneReceiver)
     else if(myRank == 1)
     {
         void* sendRegion = static_cast<uint8_t*>(winBuf) + kSendSlot;
-        fillPatternBytes(sendRegion, kSize, /*senderRank=*/1);
+        FillBuf(sendRegion, kSize, /*senderRank=*/1);
         sendRes = ncclPutSignal(sendRegion, kSize, ncclUint8,
                                 /*peer=*/2, win, /*peerWinOffset=*/4096,
                                 kSigIdx, kCtx, kFlags, comm, stream);
@@ -1041,8 +1005,8 @@ TEST_F(HostApiTest, MultipleSendersOneReceiver)
     if(myRank == 2)
     {
         const uint8_t* base = static_cast<const uint8_t*>(winBuf);
-        allOk = verifyPatternBytes(base + 0,    kSize, /*senderRank=*/0) &&
-                verifyPatternBytes(base + 4096, kSize, /*senderRank=*/1);
+        allOk = VerifyBuf(base + 0,    kSize, /*senderRank=*/0) &&
+                VerifyBuf(base + 4096, kSize, /*senderRank=*/1);
     }
     ASSERT_MPI_TRUE(allOk);
 
@@ -1092,7 +1056,7 @@ TEST_F(HostApiTest, WaitSignalMultipleDescriptors)
     if(myRank == 0)
     {
         void* sendRegion = static_cast<uint8_t*>(winBuf) + kSendSlot;
-        fillPatternBytes(sendRegion, kSize, /*senderRank=*/0);
+        FillBuf(sendRegion, kSize, /*senderRank=*/0);
         sendRes = ncclPutSignal(sendRegion, kSize, ncclUint8,
                                 /*peer=*/2, win, /*peerWinOffset=*/0,
                                 kSigIdx, kCtx, kFlags, comm, stream);
@@ -1100,7 +1064,7 @@ TEST_F(HostApiTest, WaitSignalMultipleDescriptors)
     else if(myRank == 1)
     {
         void* sendRegion = static_cast<uint8_t*>(winBuf) + kSendSlot;
-        fillPatternBytes(sendRegion, kSize, /*senderRank=*/1);
+        FillBuf(sendRegion, kSize, /*senderRank=*/1);
         sendRes = ncclPutSignal(sendRegion, kSize, ncclUint8,
                                 /*peer=*/2, win, /*peerWinOffset=*/4096,
                                 kSigIdx, kCtx, kFlags, comm, stream);
@@ -1124,8 +1088,8 @@ TEST_F(HostApiTest, WaitSignalMultipleDescriptors)
     if(myRank == 2)
     {
         const uint8_t* base = static_cast<const uint8_t*>(winBuf);
-        allOk = verifyPatternBytes(base + 0,    kSize, /*senderRank=*/0) &&
-                verifyPatternBytes(base + 4096, kSize, /*senderRank=*/1);
+        allOk = VerifyBuf(base + 0,    kSize, /*senderRank=*/0) &&
+                VerifyBuf(base + 4096, kSize, /*senderRank=*/1);
     }
     ASSERT_MPI_TRUE(allOk);
 
@@ -1174,7 +1138,7 @@ TEST_F(HostApiTest, LargePut)
     ncclResult_t putRes = ncclSuccess;
     if(myRank == 0)
     {
-        memset(winBuf, kByte, kLargeSize);
+        FillSentinel(winBuf, kLargeSize, kByte);
         putRes = ncclPutSignal(winBuf, kLargeSize, ncclUint8,
                                /*peer=*/1, win, /*peerWinOffset=*/0,
                                kSigIdx, kCtx, kFlags, comm, stream);
@@ -1191,25 +1155,7 @@ TEST_F(HostApiTest, LargePut)
 
     ASSERT_MPI_EQ(hipSuccess, hipStreamSynchronize(stream));
 
-    bool ok = true;
-    if(myRank == 1)
-    {
-        // Spot-check: first 64 bytes and last 64 bytes.
-        const uint8_t* base = static_cast<const uint8_t*>(winBuf);
-        uint8_t expected[64];
-        memset(expected, kByte, sizeof(expected));
-
-        if(memcmp(base, expected, 64) != 0)
-        {
-            fprintf(stderr, "P4: first 64 bytes of large PUT are incorrect\n");
-            ok = false;
-        }
-        else if(memcmp(base + kLargeSize - 64, expected, 64) != 0)
-        {
-            fprintf(stderr, "P4: last 64 bytes of large PUT are incorrect\n");
-            ok = false;
-        }
-    }
+    bool ok = (myRank != 1) || AllSentinel(winBuf, kLargeSize, kByte);
     ASSERT_MPI_TRUE(ok);
 
     TEST_INFO("P4 rank %d: LargePut passed.", myRank);
@@ -1263,7 +1209,7 @@ TEST_F(HostApiTest, AllToAllPut)
 
     // Carve the send buffer from this rank's own registered window.
     void* sendRegion = static_cast<uint8_t*>(winBuf) + kSendSlot;
-    fillPatternBytes(sendRegion, kSize, myRank);
+    FillBuf(sendRegion, kSize, myRank);
 
     // Batch PUT + WAIT in a group.
     ASSERT_MPI_EQ(ncclSuccess, ncclGroupStart());
@@ -1280,7 +1226,7 @@ TEST_F(HostApiTest, AllToAllPut)
     ASSERT_MPI_EQ(hipSuccess, hipStreamSynchronize(stream));
 
     // Verify: we should have received recvFrom's pattern at kRecvSlot.
-    bool ok = verifyPatternBytes(static_cast<uint8_t*>(winBuf) + kRecvSlot, kSize, recvFrom);
+    bool ok = VerifyBuf(static_cast<uint8_t*>(winBuf) + kRecvSlot, kSize, recvFrom);
     ASSERT_MPI_TRUE(ok);
 
     TEST_INFO("P5 rank %d: AllToAllPut passed (recv from rank %d).", myRank, recvFrom);
@@ -1331,8 +1277,8 @@ TEST_F(HostApiTest, SignalImpliesPriorPutsDelivered)
     {
         void* src0 = static_cast<uint8_t*>(winBuf) + kSendOffset;
         void* src1 = static_cast<uint8_t*>(winBuf) + kSendOffset + kSize;
-        fillPatternBytes(src0, kSize, /*senderRank=*/0);
-        fillPatternBytes(src1, kSize, /*senderRank=*/10);
+        FillBuf(src0, kSize, /*senderRank=*/0);
+        FillBuf(src1, kSize, /*senderRank=*/10);
         putRes = ncclPutSignal(src0, kSize, ncclUint8,
                                /*peer=*/1, win, /*peerWinOffset=*/kRecvOffset,
                                kSigIdx, kCtx, kFlags, comm, stream);
@@ -1357,8 +1303,8 @@ TEST_F(HostApiTest, SignalImpliesPriorPutsDelivered)
     if(myRank == 1)
     {
         const uint8_t* base = static_cast<const uint8_t*>(winBuf);
-        allOk = verifyPatternBytes(base + kRecvOffset,       kSize, /*senderRank=*/0) &&
-                verifyPatternBytes(base + kRecvOffset + 512, kSize, /*senderRank=*/10);
+        allOk = VerifyBuf(base + kRecvOffset,       kSize, /*senderRank=*/0) &&
+                VerifyBuf(base + kRecvOffset + 512, kSize, /*senderRank=*/10);
     }
     ASSERT_MPI_TRUE(allOk);
 
