@@ -2309,10 +2309,12 @@ void VirtualGPU::profilingBegin(amd::Command& command, bool sdmaProfiling) {
  */
 void VirtualGPU::profilingEnd(bool clearHwEvent) {
   if (!command_->getPktCapturingState() && command_->profilingInfo().enabled_) {
-    if (timestamp_->HwProfiling() == false) {
-      timestamp_->end();
+    if (timestamp_ != nullptr) {
+      if (timestamp_->HwProfiling() == false) {
+        timestamp_->end();
+      }
+      timestamp_ = nullptr;
     }
-    timestamp_ = nullptr;
   }
 
   // Certain commands like map/unmap memory may not need hw_events as its not a
@@ -4573,7 +4575,7 @@ void VirtualGPU::submitMarker(amd::Marker& vcmd) {
       s.handle = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(
           vcmd.ipcDepSignal()->getGpuHandle()));
       WaitCompleteSignal(s);
-    } else if (timestamp_ != nullptr || ipc_s.handle != 0) {
+    } else if (timestamp_ != nullptr || vcmd.profilingInfo().marker_ts_ || ipc_s.handle != 0) {
       // IPC event record: if ipc_s is non-zero, first dispatch a NOP barrier with
       // the IPC signal as completion_signal; it fires when prior work completes.
       if (ipc_s.handle != 0) {

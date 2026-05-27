@@ -201,7 +201,12 @@ hipError_t Event::recordCommand(amd::Command*& command, amd::HostQueue* stream, 
 
   constexpr bool kMarkerTs = true;
   constexpr bool kFlushCache = false;
-  command = new hip::EventMarker(*stream, kFlushCache, kMarkerTs, releaseFlags, batch_flush);
+
+  // Check hipEventDisableTiming flag to skip profiling/timing infrastructure
+  const bool enable_profiling = !(flags & hipEventDisableTiming);
+
+  command = new hip::EventMarker(*stream, kFlushCache, kMarkerTs, releaseFlags,
+                                 batch_flush, enable_profiling);
   return hipSuccess;
 }
 
