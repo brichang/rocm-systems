@@ -50,3 +50,39 @@ If the GPU device is not a virtual function, the GPU name will not include "VF".
    | 0000:a6:00.0    AMD Instinct MI300X | 0 %      46 °C   0           129/750 W |
    |   0       0       2        SPX/NPS1 | 0 %        N/A           283/196592 MB |
    +-------------------------------------+----------------------------------------+
+
+High memory utilization with hipFile
+====================================
+
+Processes using child processes for IO parallelism may observe each child
+process consuming a large amount of memory.
+
+Here is the memory usage of fio using the hipFile engine with four job processes:
+
+.. code-block:: none
+
+    PID  VIRT   RES   SHR Command
+   7851 4646M  197M 79364 fio --time_based --runtime=120s --filename=/dev/nvme0n1 --direct=1 --rw=read --bs=8M --name=bw --numjobs=4 --ioengine=libhipfile --rocm_io=hipfile --gpu_dev_ids=0
+   7853 4646M  199M 81516 fio --time_based --runtime=120s --filename=/dev/nvme0n1 --direct=1 --rw=read --bs=8M --name=bw --numjobs=4 --ioengine=libhipfile --rocm_io=hipfile --gpu_dev_ids=0
+   7852 4646M  197M 79804 fio --time_based --runtime=120s --filename=/dev/nvme0n1 --direct=1 --rw=read --bs=8M --name=bw --numjobs=4 --ioengine=libhipfile --rocm_io=hipfile --gpu_dev_ids=0
+   7850 4646M  199M 81504 fio --time_based --runtime=120s --filename=/dev/nvme0n1 --direct=1 --rw=read --bs=8M --name=bw --numjobs=4 --ioengine=libhipfile --rocm_io=hipfile --gpu_dev_ids=0
+
+Here is the memory usage of fio using the psync engine with four job processes:
+
+.. code-block:: none
+
+    PID VIRT   RES   SHR Command
+   8021 237M 18004  1640 fio --time_based --runtime=120s --filename=/dev/nvme0n1 --direct=1 --rw=read --bs=8M --name=bw --numjobs=4 --ioengine=psync
+   8022 237M 18004  1640 fio --time_based --runtime=120s --filename=/dev/nvme0n1 --direct=1 --rw=read --bs=8M --name=bw --numjobs=4 --ioengine=psync
+   8023 237M 18044  1680 fio --time_based --runtime=120s --filename=/dev/nvme0n1 --direct=1 --rw=read --bs=8M --name=bw --numjobs=4 --ioengine=psync
+   8024 237M 18040  1676 fio --time_based --runtime=120s --filename=/dev/nvme0n1 --direct=1 --rw=read --bs=8M --name=bw --numjobs=4 --ioengine=psync
+
+Some of the increased memory usage can be attributed to the HIP runtime
+dynamically loading the LLVM/Clang compiler stack to compile device kernels
+on-demand. When using child processes for IO parallelism, each child process
+will load the LLVM/Clang compiler stack separately, leading to increased memory
+usage.
+
+Using threads for IO parallelism instead of child processes can help reduce
+overall memory usage as the HIP runtime and its dependencies will be shared
+among threads.
