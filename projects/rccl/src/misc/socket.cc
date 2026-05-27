@@ -430,6 +430,16 @@ ncclResult_t ncclSocketListen(struct ncclSocket* sock) {
    * NB: The backlog will be silently truncated to the value in /proc/sys/net/core/somaxconn
    */
   SYSCHECK(listen(sock->fd, 16384), "listen");
+  // Force O_NONBLOCK on the listener fd. socketTryAccept() calls accept()
+  // on this fd via sock->acceptFd from inside an async progress loop and
+  // already handles EAGAIN/EWOULDBLOCK; without O_NONBLOCK accept() blocks
+  // the bootstrap thread and deadlocks the IB-CAST GIN ring-connect
+  // handshake on single-node setups (AICOMNET-196).
+  {
+    int flags;
+    SYSCHECK(flags = fcntl(sock->fd, F_GETFL), "fcntl");
+    SYSCHECK(fcntl(sock->fd, F_SETFL, flags | O_NONBLOCK), "fcntl");
+  }
   sock->state = ncclSocketStateReady;
   return ncclSuccess;
 }
