@@ -109,3 +109,13 @@ IOs that would have used the fallback path will fail with
 ``hipFileInternalError`` instead.
 
 This issue has not been observed on other GPU architectures.
+
+Lower than expected IOPS with small IO sizes
+============================================
+
+hipFile may deliver lower than expected IOPS with small IO sizes (less than
+32KiB) and many threads/processes. This is caused by lock contention when
+pinning/unpinning GPU buffers. With small IO sizes, threads pin and unpin GPU
+buffers rapidly. A lock must be held when buffers are pinned and unpinned. As
+IO sizes increase beyond 32KiB, threads pin and unpin GPU buffers less
+frequently, reducing lock contention.
