@@ -86,3 +86,26 @@ usage.
 Using threads for IO parallelism instead of child processes can help reduce
 overall memory usage as the HIP runtime and its dependencies will be shared
 among threads.
+
+GPU Reset on RDNA4 GPUs
+=======================
+
+hipFile's fallback path may trigger GPU resets on RDNA4 GPUs. The fallback path
+is used when IO does not meet the requirements to use the fastpath.
+
+From the systemd journal:
+
+.. code-block:: none
+
+  kernel: amdgpu 0000:f3:00.0: amdgpu: MES might be in unrecoverable state, issue a GPU reset
+  kernel: amdgpu 0000:f3:00.0: amdgpu: Suspending all queues failed
+  kernel: amdgpu 0000:f3:00.0: amdgpu: Failed to evict process queues
+  kernel: amdgpu: Failed to quiesce KFD
+  kernel: amdgpu 0000:f3:00.0: amdgpu: GPU reset begin!. Source:  3
+
+To work around this issue, avoid the use of the fallback path on RDNA4 GPUs. Add
+``HIPFILE_ALLOW_COMPAT_MODE=0`` to the environment to disable the fallback path.
+IOs that would have used the fallback path will fail with
+``hipFileInternalError`` instead.
+
+This issue has not been observed on other GPU architectures.
