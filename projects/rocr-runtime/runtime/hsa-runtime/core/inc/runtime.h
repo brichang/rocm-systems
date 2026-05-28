@@ -49,6 +49,7 @@
 #include <map>
 #include <memory>
 #include <tuple>
+#include <unordered_map>
 #include <utility>
 #include <thread>
 #include <mutex>
@@ -997,14 +998,14 @@ class Runtime {
           thunk_handle(thunk_handle),
           alloc_flag(alloc_flag) {}
 
-    static __forceinline hsa_amd_vmem_alloc_handle_t Convert(ThunkHandle handle) {
+    static __forceinline hsa_amd_vmem_alloc_handle_t Convert(MemoryHandle* mh) {
       hsa_amd_vmem_alloc_handle_t ret_handle = {
-          static_cast<uint64_t>(reinterpret_cast<uintptr_t>(handle))};
+          static_cast<uint64_t>(reinterpret_cast<uintptr_t>(mh))};
       return ret_handle;
     }
 
-    static __forceinline ThunkHandle Convert(hsa_amd_vmem_alloc_handle_t handle) {
-      return reinterpret_cast<void*>(handle.handle);
+    static __forceinline MemoryHandle* Convert(hsa_amd_vmem_alloc_handle_t handle) {
+      return reinterpret_cast<MemoryHandle*>(handle.handle);
     }
 
     __forceinline core::Agent* agentOwner() const { return region->owner(); }
@@ -1016,7 +1017,11 @@ class Runtime {
     ThunkHandle thunk_handle;  // handle returned by Driver::Allocate(NoAddress = 1)
     MemoryRegion::AllocateFlags alloc_flag;
   };
-  std::map<ThunkHandle, MemoryHandle> memory_handle_map_;
+
+  // hsa_amd_vmem_alloc_handle_t (MemoryHandle*) to MemoryHandle mapping. Owns MemoryHandle
+  // lifetime. Uniqueness is guaranteed by the runtime, independent of any driver-supplied
+  // identifier.
+  std::unordered_map<MemoryHandle*, std::unique_ptr<MemoryHandle>> memory_handle_map_;
 
   struct MappedHandle;
   struct MappedHandleAllowedAgent {

@@ -3762,38 +3762,36 @@ hsa_status_t Runtime::VMemoryHandleCreate(const MemoryRegion* region, size_t siz
   hsa_status_t status =
       region->Allocate(size, alloc_flags, &user_mode_driver_handle, 0);
   if (status == HSA_STATUS_SUCCESS) {
-    memory_handle_map_.emplace(std::piecewise_construct,
-                               std::forward_as_tuple(user_mode_driver_handle),
-                               std::forward_as_tuple(region, size, flags_unused,
-                                                     user_mode_driver_handle,
-                                                     alloc_flags));
-
-    *memoryOnlyHandle = MemoryHandle::Convert(user_mode_driver_handle);
+    auto memoryHandle = std::make_unique<MemoryHandle>(region, size, flags_unused,
+                                                       user_mode_driver_handle, alloc_flags);
+    MemoryHandle* mh = memoryHandle.get();
+    memory_handle_map_.emplace(mh, std::move(memoryHandle));
+    *memoryOnlyHandle = MemoryHandle::Convert(mh);
   }
   return status;
 }
 
 hsa_status_t Runtime::VMemoryHandleRelease(hsa_amd_vmem_alloc_handle_t memoryOnlyHandle) {
   std::lock_guard<std::shared_mutex> lock(memory_lock_);
-  auto memoryHandleIt = memory_handle_map_.find(MemoryHandle::Convert(memoryOnlyHandle));
-
-  if (memoryHandleIt == memory_handle_map_.end()) {
+  MemoryHandle* mh = MemoryHandle::Convert(memoryOnlyHandle);
+  auto it = memory_handle_map_.find(mh);
+  if (it == memory_handle_map_.end()) {
     debug_warning(false && "Can't find memory handle");
     return HSA_STATUS_ERROR_INVALID_ALLOCATION;
   }
 
-  if (!memoryHandleIt->second.ref_count) return HSA_STATUS_ERROR_INVALID_ALLOCATION;
+  if (!mh->ref_count) return HSA_STATUS_ERROR_INVALID_ALLOCATION;
 
-  if (--(memoryHandleIt->second.ref_count) == 0) {
+  if (--(mh->ref_count) == 0) {
     // From documentation, the handle can be released while there are still outstanding mappings. If
     // there are outstanding mappings, then we just decrement the ref count and exit. We will free
     // this handle when the last MappedHandle is deleted
     // and use_count == 0 and ref_count == 0.
 
-    if (memoryHandleIt->second.use_count > 0) return HSA_STATUS_SUCCESS;
+    if (mh->use_count > 0) return HSA_STATUS_SUCCESS;
 
-    memoryHandleIt->second.region->Free(memoryHandleIt->first, memoryHandleIt->second.size);
-    memory_handle_map_.erase(memoryHandleIt);
+    mh->region->Free(mh->thunk_handle, mh->size);
+    memory_handle_map_.erase(it);
   }
   return HSA_STATUS_SUCCESS;
 }
@@ -3821,13 +3819,14 @@ hsa_status_t Runtime::VMemoryHandleMap(void* va, size_t size, size_t in_offset,
     if (reinterpret_cast<uint8_t*>(va) + size > lowerMappedHandleIt->first) return HSA_STATUS_ERROR_INVALID_ARGUMENT;
   }
 
-  auto memoryHandleIt = memory_handle_map_.find(MemoryHandle::Convert(memoryOnlyHandle));
-  if (memoryHandleIt == memory_handle_map_.end()) {
+  MemoryHandle* mh = MemoryHandle::Convert(memoryOnlyHandle);
+  auto it = memory_handle_map_.find(mh);
+  if (it == memory_handle_map_.end()) {
     debug_warning(false && "Can't find memory handle");
     return HSA_STATUS_ERROR_INVALID_ARGUMENT;
   }
 
-  auto *agent = memoryHandleIt->second.agentOwner();
+  auto* agent = mh->agentOwner();
 
   if (agent->device_type() == core::Agent::DeviceType::kAmdCpuDevice)
     return HSA_STATUS_ERROR_INVALID_AGENT;
@@ -3838,18 +3837,17 @@ hsa_status_t Runtime::VMemoryHandleMap(void* va, size_t size, size_t in_offset,
   int drm_fd = 0;
   uint64_t drm_fd_offset = 0;
   hsa_status_t err = agent->driver().CreateShareableHandle(
-      va, memoryHandleIt->first, size, *agent, &shareable_handle, &offset, &drm_fd, &drm_fd_offset);
+      va, mh->thunk_handle, size, *agent, &shareable_handle, &offset, &drm_fd, &drm_fd_offset);
   if (err != HSA_STATUS_SUCCESS) return err;
 
   // Register the mapping
-  mapped_handle_map_.emplace(
-      std::piecewise_construct, std::forward_as_tuple(va),
-      std::forward_as_tuple(&memoryHandleIt->second, addressHandle, va, offset, size, drm_fd,
-                            reinterpret_cast<void*>(drm_fd_offset), HSA_ACCESS_PERMISSION_NONE,
-                            shareable_handle));
+  mapped_handle_map_.emplace(std::piecewise_construct, std::forward_as_tuple(va),
+                             std::forward_as_tuple(mh, addressHandle, va, offset, size, drm_fd,
+                                                   reinterpret_cast<void*>(drm_fd_offset),
+                                                   HSA_ACCESS_PERMISSION_NONE, shareable_handle));
 
   addressHandle->use_count++;
-  memoryHandleIt->second.use_count++;
+  mh->use_count++;
 
   return HSA_STATUS_SUCCESS;
 }
@@ -3907,9 +3905,9 @@ hsa_status_t Runtime::VMemoryHandleUnmap(void* va, size_t size) {
         // User called VMemoryHandleRelease while this mapping was still
         // outstanding. We need to delete the MemoryHandle as it is the last
         // MappedHandle that was using it.
-      mappedHandleIt.second->mem_handle->region->Free(mappedHandleIt.second->mem_handle->thunk_handle,
-                                                      mappedHandleIt.second->mem_handle->size);
-      memory_handle_map_.erase(mappedHandleIt.second->mem_handle->thunk_handle);
+        MemoryHandle* mh = mappedHandleIt.second->mem_handle;
+        mh->region->Free(mh->thunk_handle, mh->size);
+        memory_handle_map_.erase(mh);
     }
 
     mapped_handle_map_.erase(mappedHandleIt.first);
@@ -4217,16 +4215,16 @@ hsa_status_t Runtime::VMemoryExportShareableHandle(int* dmabuf_fd,
                                                    uint64_t flags) {
   std::lock_guard<std::shared_mutex> lock(memory_lock_);
   *dmabuf_fd = -1;
-  auto memoryHandle = memory_handle_map_.find(MemoryHandle::Convert(handle));
-  if (memoryHandle == memory_handle_map_.end()) {
+  MemoryHandle* mh = MemoryHandle::Convert(handle);
+  if (memory_handle_map_.find(mh) == memory_handle_map_.end()) {
     debug_warning(false && "Can't find memory handle");
     return HSA_STATUS_ERROR_INVALID_ALLOCATION;
   }
 
   uint64_t offset;
 
-  hsa_status_t err = memoryHandle->second.region->owner()->driver().ExportDMABuf(
-      memoryHandle->second.thunk_handle, memoryHandle->second.size, dmabuf_fd, &offset);
+  hsa_status_t err =
+      mh->region->owner()->driver().ExportDMABuf(mh->thunk_handle, mh->size, dmabuf_fd, &offset);
   if (err != HSA_STATUS_SUCCESS) return err;
 
   return HSA_STATUS_SUCCESS;
@@ -4253,7 +4251,7 @@ hsa_status_t Runtime::VMemoryImportShareableHandle(int dmabuf_fd,
 
       // TODO: Verify that this works on a system with FINE_GRAINED memory.
       // System's with FINE_GRAINED will have both COARSE and FINE grain... need to get the
-      // rigtht one.
+      // right one.
 
       bool alloc_allowed;
       hsa_status_t status =
@@ -4270,13 +4268,14 @@ hsa_status_t Runtime::VMemoryImportShareableHandle(int dmabuf_fd,
   size_t size = info.SizeInBytes;
   int gpuid = info.NodeId;
 
-
-  auto memoryHandleIt = memory_handle_map_.find(thunk_handle);
-  if (memoryHandleIt != memory_handle_map_.end()) {
-    /* This handle was already imported, increment ref_count and return */
-    memoryHandleIt->second.ref_count++;
-    *memoryOnlyHandle = MemoryHandle::Convert(thunk_handle);
-    return HSA_STATUS_SUCCESS;
+  // Dedup: if this dmabuf was already imported, find the existing entry by its
+  // driver-returned thunk_handle and increment the ref count.
+  for (auto& entry : memory_handle_map_) {
+    if (entry.first->thunk_handle == thunk_handle) {
+      entry.first->ref_count++;
+      *memoryOnlyHandle = MemoryHandle::Convert(entry.first);
+      return HSA_STATUS_SUCCESS;
+    }
   }
 
   const AMD::MemoryRegion* region = NULL;
@@ -4291,10 +4290,10 @@ hsa_status_t Runtime::VMemoryImportShareableHandle(int dmabuf_fd,
   MemoryRegion::AllocateFlags alloc_flag = core::MemoryRegion::AllocateNoFlags;
   if (ptrInfo.MemFlags.ui32.NoSubstitute) alloc_flag |= core::MemoryRegion::AllocatePinned;
 
-  memory_handle_map_.emplace(std::piecewise_construct,
-          std::forward_as_tuple(thunk_handle),
-          std::forward_as_tuple(region, size, 0, thunk_handle, alloc_flag));
-  *memoryOnlyHandle = MemoryHandle::Convert(thunk_handle);
+  auto memoryHandle = std::make_unique<MemoryHandle>(region, size, 0, thunk_handle, alloc_flag);
+  MemoryHandle* mh = memoryHandle.get();
+  memory_handle_map_.emplace(mh, std::move(memoryHandle));
+  *memoryOnlyHandle = MemoryHandle::Convert(mh);
 
   return HSA_STATUS_SUCCESS;
 }
@@ -4305,9 +4304,9 @@ hsa_status_t Runtime::VMemoryRetainAllocHandle(hsa_amd_vmem_alloc_handle_t* mapp
   auto mappedHandleIt = mapped_handle_map_.find(va);
   if (mappedHandleIt == mapped_handle_map_.end()) return HSA_STATUS_ERROR_INVALID_ALLOCATION;
 
-  MemoryHandle* memoryHandle = mappedHandleIt->second.mem_handle;
-  memoryHandle->ref_count++;
-  *mapped_handle = MemoryHandle::Convert(memoryHandle->thunk_handle);
+  MemoryHandle* mh = mappedHandleIt->second.mem_handle;
+  mh->ref_count++;
+  *mapped_handle = MemoryHandle::Convert(mh);
 
   return HSA_STATUS_SUCCESS;
 }
@@ -4316,13 +4315,13 @@ hsa_status_t Runtime::VMemoryGetAllocPropertiesFromHandle(hsa_amd_vmem_alloc_han
                                                           const core::MemoryRegion** mem_region,
                                                           hsa_amd_memory_type_t* type) {
   std::lock_guard<std::shared_mutex> lock(memory_lock_);
-  auto memoryHandleIt = memory_handle_map_.find(MemoryHandle::Convert(allocHandle));
-  if (memoryHandleIt == memory_handle_map_.end()) return HSA_STATUS_ERROR_INVALID_ALLOCATION;
+  MemoryHandle* mh = MemoryHandle::Convert(allocHandle);
+  if (memory_handle_map_.find(mh) == memory_handle_map_.end())
+    return HSA_STATUS_ERROR_INVALID_ALLOCATION;
 
-  *mem_region = memoryHandleIt->second.region;
-  *type = (memoryHandleIt->second.alloc_flag & core::MemoryRegion::AllocatePinned)
-      ? MEMORY_TYPE_PINNED
-      : MEMORY_TYPE_NONE;
+  *mem_region = mh->region;
+  *type =
+      (mh->alloc_flag & core::MemoryRegion::AllocatePinned) ? MEMORY_TYPE_PINNED : MEMORY_TYPE_NONE;
 
   return HSA_STATUS_SUCCESS;
 }
