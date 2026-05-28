@@ -84,6 +84,7 @@ protected:
         ASSERT_EQ(ncclSuccess, createTestCommunicator());
     }
 
+public:
     // Convenience: get rank and world size from the active communicator.
     int rank()   const
     {
@@ -128,14 +129,14 @@ constexpr unsigned int kFlags  = 0;
  * All ranks allocate a fine-grain buffer, collectively register a window,
  * skip if the system does not support windows, then deregister.
  */
-TEST_F(HostApiTest, WindowRegisterDeregister)
+static void runWindowRegisterDeregister(HostApiTest* self, int winFlags)
 {
-    if(!validateTestPrerequisites(/*min=*/2))
+    if(!self->validateTestPrerequisites(/*min=*/2))
     {
         GTEST_SKIP() << "Need at least 2 MPI processes";
     }
 
-    const int myRank = rank();
+    const int myRank = self->rank();
 
     // Allocate fine-grain buffer (CPU-accessible on ROCm).
     void* buf = nullptr;
@@ -144,15 +145,15 @@ TEST_F(HostApiTest, WindowRegisterDeregister)
 
     // Collective window registration.
     ncclWindow_t win = nullptr;
-    NcclWindowGuard wg(getActiveCommunicator(), buf, kOneMB, &win, NCCL_WIN_DEFAULT);
+    NcclWindowGuard wg(self->getActiveCommunicator(), buf, kOneMB, &win, winFlags);
 
     if(win == nullptr)
     {
         // System / transport does not support windows — skip cleanly.
         if(myRank == 0)
         {
-            TEST_INFO("ncclCommWindowRegister returned nullptr window — system does not "
-                      "support Host API windows; skipping W1.");
+            TEST_INFO("ncclCommWindowRegister returned nullptr window (winFlags=0x%x) — "
+                      "system does not support Host API windows; skipping W1.", winFlags);
         }
         GTEST_SKIP() << "System does not support ncclWindow (win == nullptr)";
     }
@@ -160,7 +161,18 @@ TEST_F(HostApiTest, WindowRegisterDeregister)
     ASSERT_MPI_EQ(ncclSuccess, wg.initResult());
 
     // NcclWindowGuard destructor calls ncclCommWindowDeregister.
-    TEST_INFO("W1 rank %d: window registered and will be deregistered by guard.", myRank);
+    TEST_INFO("W1 rank %d: window registered and will be deregistered by guard (winFlags=0x%x).",
+              myRank, winFlags);
+}
+
+TEST_F(HostApiTest, WindowRegisterDeregister)
+{
+    runWindowRegisterDeregister(this, NCCL_WIN_DEFAULT);
+}
+
+TEST_F(HostApiTest, WindowRegisterDeregisterSymmetric)
+{
+    runWindowRegisterDeregister(this, NCCL_WIN_COLL_SYMMETRIC);
 }
 
 // ============================================================================
@@ -175,16 +187,16 @@ TEST_F(HostApiTest, WindowRegisterDeregister)
  * rank 1's window.  Rank 1 issues ncclWaitSignal(opCnt=1).  After
  * hipStreamSynchronize rank 1 verifies the window buffer.
  */
-TEST_F(HostApiTest, SinglePutRank0ToRank1)
+static void runSinglePutRank0ToRank1(HostApiTest* self, int winFlags)
 {
-    if(!validateTestPrerequisites(/*min=*/2, /*max=*/2))
+    if(!self->validateTestPrerequisites(/*min=*/2, /*max=*/2))
     {
         GTEST_SKIP() << "Need exactly 2 MPI processes";
     }
 
-    const int myRank = rank();
-    ncclComm_t    comm   = getActiveCommunicator();
-    hipStream_t   stream = getActiveStream();
+    const int myRank = self->rank();
+    ncclComm_t    comm   = self->getActiveCommunicator();
+    hipStream_t   stream = self->getActiveStream();
 
     // Both ranks allocate + register a window.
     // The window is split: [kSendOffset, kTransferSize) is the sender's source
@@ -194,7 +206,7 @@ TEST_F(HostApiTest, SinglePutRank0ToRank1)
     auto winBufGuard = makeScopeGuard([&]() { freeFineGrainBuffer(winBuf); });
 
     ncclWindow_t win = nullptr;
-    NcclWindowGuard wg(comm, winBuf, kOneMB, &win, NCCL_WIN_DEFAULT);
+    NcclWindowGuard wg(comm, winBuf, kOneMB, &win, winFlags);
 
     if(win == nullptr)
     {
@@ -239,7 +251,17 @@ TEST_F(HostApiTest, SinglePutRank0ToRank1)
               VerifyBuf(static_cast<const uint8_t*>(winBuf) + kRecvOffset, kTransferSize, /*seed=*/0);
     ASSERT_MPI_TRUE(ok);
 
-    TEST_INFO("P1 rank %d: SinglePutRank0ToRank1 passed.", myRank);
+    TEST_INFO("P1 rank %d: SinglePutRank0ToRank1 passed (winFlags=0x%x).", myRank, winFlags);
+}
+
+TEST_F(HostApiTest, SinglePutRank0ToRank1)
+{
+    runSinglePutRank0ToRank1(this, NCCL_WIN_DEFAULT);
+}
+
+TEST_F(HostApiTest, SinglePutRank0ToRank1Symmetric)
+{
+    runSinglePutRank0ToRank1(this, NCCL_WIN_COLL_SYMMETRIC);
 }
 
 // ============================================================================
@@ -253,16 +275,16 @@ TEST_F(HostApiTest, SinglePutRank0ToRank1)
  * Same as P1 but the destination window offset is placed at the midpoint of
  * the window.  Rank 1 verifies only the offset region.
  */
-TEST_F(HostApiTest, PutWithNonZeroOffset)
+static void runPutWithNonZeroOffset(HostApiTest* self, int winFlags)
 {
-    if(!validateTestPrerequisites(/*min=*/2, /*max=*/2))
+    if(!self->validateTestPrerequisites(/*min=*/2, /*max=*/2))
     {
         GTEST_SKIP() << "Need exactly 2 MPI processes";
     }
 
-    const int       myRank = rank();
-    ncclComm_t      comm   = getActiveCommunicator();
-    hipStream_t     stream = getActiveStream();
+    const int       myRank = self->rank();
+    ncclComm_t      comm   = self->getActiveCommunicator();
+    hipStream_t     stream = self->getActiveStream();
 
     // Window layout: [kSendOffset..kTransferSize) = send region,
     //                [kRecvOffset..kRecvOffset+kTransferSize) = recv region.
@@ -272,7 +294,7 @@ TEST_F(HostApiTest, PutWithNonZeroOffset)
     auto winBufGuard = makeScopeGuard([&]() { freeFineGrainBuffer(winBuf); });
 
     ncclWindow_t win = nullptr;
-    NcclWindowGuard wg(comm, winBuf, kOneMB, &win, NCCL_WIN_DEFAULT);
+    NcclWindowGuard wg(comm, winBuf, kOneMB, &win, winFlags);
     if(win == nullptr)
     {
         GTEST_SKIP() << "System does not support ncclWindow";
@@ -309,7 +331,17 @@ TEST_F(HostApiTest, PutWithNonZeroOffset)
     bool ok = (myRank != 1) || VerifyBuf(recvBuf, kTransferSize, /*senderRank=*/0);
     ASSERT_MPI_TRUE(ok);
 
-    TEST_INFO("P2 rank %d: PutWithNonZeroOffset passed.", myRank);
+    TEST_INFO("P2 rank %d: PutWithNonZeroOffset passed (winFlags=0x%x).", myRank, winFlags);
+}
+
+TEST_F(HostApiTest, PutWithNonZeroOffset)
+{
+    runPutWithNonZeroOffset(this, NCCL_WIN_DEFAULT);
+}
+
+TEST_F(HostApiTest, PutWithNonZeroOffsetSymmetric)
+{
+    runPutWithNonZeroOffset(this, NCCL_WIN_COLL_SYMMETRIC);
 }
 
 // ============================================================================
@@ -323,16 +355,16 @@ TEST_F(HostApiTest, PutWithNonZeroOffset)
  * The test uses ncclPutSignal with the correct element type.  Verification
  * is done via FillBuf / VerifyBuf on the raw bytes of each element array.
  */
-TEST_F(HostApiTest, PutMultipleDataTypes)
+static void runPutMultipleDataTypes(HostApiTest* self, int winFlags)
 {
-    if(!validateTestPrerequisites(/*min=*/2, /*max=*/2))
+    if(!self->validateTestPrerequisites(/*min=*/2, /*max=*/2))
     {
         GTEST_SKIP() << "Need exactly 2 MPI processes";
     }
 
-    const int      myRank = rank();
-    ncclComm_t     comm   = getActiveCommunicator();
-    hipStream_t    stream = getActiveStream();
+    const int      myRank = self->rank();
+    ncclComm_t     comm   = self->getActiveCommunicator();
+    hipStream_t    stream = self->getActiveStream();
     const size_t   kElem  = 256;
 
     // Describe the three types: {ncclDataType, element_size, recv offset in window}
@@ -356,7 +388,7 @@ TEST_F(HostApiTest, PutMultipleDataTypes)
     auto winBufGuard = makeScopeGuard([&]() { freeFineGrainBuffer(winBuf); });
 
     ncclWindow_t win = nullptr;
-    NcclWindowGuard wg(comm, winBuf, kWinSize, &win, NCCL_WIN_DEFAULT);
+    NcclWindowGuard wg(comm, winBuf, kWinSize, &win, winFlags);
     if(win == nullptr)
     {
         GTEST_SKIP() << "System does not support ncclWindow";
@@ -399,6 +431,16 @@ TEST_F(HostApiTest, PutMultipleDataTypes)
     }
 }
 
+TEST_F(HostApiTest, PutMultipleDataTypes)
+{
+    runPutMultipleDataTypes(this, NCCL_WIN_DEFAULT);
+}
+
+TEST_F(HostApiTest, PutMultipleDataTypesSymmetric)
+{
+    runPutMultipleDataTypes(this, NCCL_WIN_COLL_SYMMETRIC);
+}
+
 // ============================================================================
 // S1 — SignalOnlyNoData
 // ============================================================================
@@ -412,16 +454,16 @@ TEST_F(HostApiTest, PutMultipleDataTypes)
  * Rank 1 issues ncclWaitSignal(opCnt=1, peer=0).
  * After sync rank 1 verifies every byte is still 0xAB.
  */
-TEST_F(HostApiTest, SignalOnlyNoData)
+static void runSignalOnlyNoData(HostApiTest* self, int winFlags)
 {
-    if(!validateTestPrerequisites(/*min=*/2, /*max=*/2))
+    if(!self->validateTestPrerequisites(/*min=*/2, /*max=*/2))
     {
         GTEST_SKIP() << "Need exactly 2 MPI processes";
     }
 
-    const int       myRank = rank();
-    ncclComm_t      comm   = getActiveCommunicator();
-    hipStream_t     stream = getActiveStream();
+    const int       myRank = self->rank();
+    ncclComm_t      comm   = self->getActiveCommunicator();
+    hipStream_t     stream = self->getActiveStream();
     const uint8_t   kSentinel = 0xAB;
 
     void* winBuf = nullptr;
@@ -429,7 +471,7 @@ TEST_F(HostApiTest, SignalOnlyNoData)
     auto winBufGuard = makeScopeGuard([&]() { freeFineGrainBuffer(winBuf); });
 
     ncclWindow_t win = nullptr;
-    NcclWindowGuard wg(comm, winBuf, kOneMB, &win, NCCL_WIN_DEFAULT);
+    NcclWindowGuard wg(comm, winBuf, kOneMB, &win, winFlags);
     if(win == nullptr)
     {
         GTEST_SKIP() << "System does not support ncclWindow";
@@ -461,7 +503,17 @@ TEST_F(HostApiTest, SignalOnlyNoData)
     bool allSentinel = (myRank != 1) || AllSentinel(winBuf, kOneMB, kSentinel);
     ASSERT_MPI_TRUE(allSentinel);
 
-    TEST_INFO("S1 rank %d: SignalOnlyNoData passed.", myRank);
+    TEST_INFO("S1 rank %d: SignalOnlyNoData passed (winFlags=0x%x).", myRank, winFlags);
+}
+
+TEST_F(HostApiTest, SignalOnlyNoData)
+{
+    runSignalOnlyNoData(this, NCCL_WIN_DEFAULT);
+}
+
+TEST_F(HostApiTest, SignalOnlyNoDataSymmetric)
+{
+    runSignalOnlyNoData(this, NCCL_WIN_COLL_SYMMETRIC);
 }
 
 // ============================================================================
@@ -481,16 +533,16 @@ TEST_F(HostApiTest, SignalOnlyNoData)
  * Note: VerifyBuf uses seed as the pattern index.  We pass synthetic seed
  * values (10, 20, 30) to distinguish the three regions.
  */
-TEST_F(HostApiTest, WaitSignalFenceSemantics)
+static void runWaitSignalFenceSemantics(HostApiTest* self, int winFlags)
 {
-    if(!validateTestPrerequisites(/*min=*/2, /*max=*/2))
+    if(!self->validateTestPrerequisites(/*min=*/2, /*max=*/2))
     {
         GTEST_SKIP() << "Need exactly 2 MPI processes";
     }
 
-    const int    myRank    = rank();
-    ncclComm_t   comm      = getActiveCommunicator();
-    hipStream_t  stream    = getActiveStream();
+    const int    myRank    = self->rank();
+    ncclComm_t   comm      = self->getActiveCommunicator();
+    hipStream_t  stream    = self->getActiveStream();
     const int    kNumPuts  = 3;
     // Window layout (rank 0): [kSendOffset .. kSendOffset+kTransferSize) is the
     // send region (reused for each PUT); recv region not used by rank 0.
@@ -505,7 +557,7 @@ TEST_F(HostApiTest, WaitSignalFenceSemantics)
     auto winBufGuard = makeScopeGuard([&]() { freeFineGrainBuffer(winBuf); });
 
     ncclWindow_t win = nullptr;
-    NcclWindowGuard wg(comm, winBuf, kWinSize, &win, NCCL_WIN_DEFAULT);
+    NcclWindowGuard wg(comm, winBuf, kWinSize, &win, winFlags);
     if(win == nullptr)
     {
         GTEST_SKIP() << "System does not support ncclWindow";
@@ -559,7 +611,17 @@ TEST_F(HostApiTest, WaitSignalFenceSemantics)
     }
     ASSERT_MPI_TRUE(allOk);
 
-    TEST_INFO("WS2 rank %d: WaitSignalFenceSemantics passed.", myRank);
+    TEST_INFO("WS2 rank %d: WaitSignalFenceSemantics passed (winFlags=0x%x).", myRank, winFlags);
+}
+
+TEST_F(HostApiTest, WaitSignalFenceSemantics)
+{
+    runWaitSignalFenceSemantics(this, NCCL_WIN_DEFAULT);
+}
+
+TEST_F(HostApiTest, WaitSignalFenceSemanticsSymmetric)
+{
+    runWaitSignalFenceSemantics(this, NCCL_WIN_COLL_SYMMETRIC);
 }
 
 // ============================================================================
@@ -575,23 +637,23 @@ TEST_F(HostApiTest, WaitSignalFenceSemantics)
  * VerifyBuf copies device→host via hipMemcpy into a staging buffer and checks
  * bytes there.
  */
-TEST_F(HostApiTest, DataVisibilityAfterSync)
+static void runDataVisibilityAfterSync(HostApiTest* self, int winFlags)
 {
-    if(!validateTestPrerequisites(/*min=*/2, /*max=*/2))
+    if(!self->validateTestPrerequisites(/*min=*/2, /*max=*/2))
     {
         GTEST_SKIP() << "Need exactly 2 MPI processes";
     }
 
-    const int    myRank = rank();
-    ncclComm_t   comm   = getActiveCommunicator();
-    hipStream_t  stream = getActiveStream();
+    const int    myRank = self->rank();
+    ncclComm_t   comm   = self->getActiveCommunicator();
+    hipStream_t  stream = self->getActiveStream();
 
     void* winBuf = nullptr;
     ASSERT_MPI_EQ(ncclSuccess, allocFineGrainBuffer(&winBuf, kOneMB));
     auto winBufGuard = makeScopeGuard([&]() { freeFineGrainBuffer(winBuf); });
 
     ncclWindow_t win = nullptr;
-    NcclWindowGuard wg(comm, winBuf, kOneMB, &win, NCCL_WIN_DEFAULT);
+    NcclWindowGuard wg(comm, winBuf, kOneMB, &win, winFlags);
     if(win == nullptr)
     {
         GTEST_SKIP() << "System does not support ncclWindow";
@@ -625,7 +687,17 @@ TEST_F(HostApiTest, DataVisibilityAfterSync)
               VerifyBuf(static_cast<const uint8_t*>(winBuf) + kRecvOffset, kTransferSize, /*seed=*/0);
     ASSERT_MPI_TRUE(ok);
 
-    TEST_INFO("O1 rank %d: DataVisibilityAfterSync passed.", myRank);
+    TEST_INFO("O1 rank %d: DataVisibilityAfterSync passed (winFlags=0x%x).", myRank, winFlags);
+}
+
+TEST_F(HostApiTest, DataVisibilityAfterSync)
+{
+    runDataVisibilityAfterSync(this, NCCL_WIN_DEFAULT);
+}
+
+TEST_F(HostApiTest, DataVisibilityAfterSyncSymmetric)
+{
+    runDataVisibilityAfterSync(this, NCCL_WIN_COLL_SYMMETRIC);
 }
 
 // ============================================================================
@@ -639,16 +711,16 @@ TEST_F(HostApiTest, DataVisibilityAfterSync)
  * Only rank 0 calls the API (non-collective immediate check).  Rank 1 does
  * nothing to avoid deadlock.  If argcheck is not implemented the test skips.
  */
-TEST_F(HostApiTest, PutSignalNullLocalbuff)
+static void runPutSignalNullLocalbuff(HostApiTest* self, int winFlags)
 {
-    if(!validateTestPrerequisites(/*min=*/2, /*max=*/2))
+    if(!self->validateTestPrerequisites(/*min=*/2, /*max=*/2))
     {
         GTEST_SKIP() << "Need exactly 2 MPI processes";
     }
 
-    const int    myRank = rank();
-    ncclComm_t   comm   = getActiveCommunicator();
-    hipStream_t  stream = getActiveStream();
+    const int    myRank = self->rank();
+    ncclComm_t   comm   = self->getActiveCommunicator();
+    hipStream_t  stream = self->getActiveStream();
 
     // Both ranks must register a window (collective).
     void* winBuf = nullptr;
@@ -656,7 +728,7 @@ TEST_F(HostApiTest, PutSignalNullLocalbuff)
     auto winBufGuard = makeScopeGuard([&]() { freeFineGrainBuffer(winBuf); });
 
     ncclWindow_t win = nullptr;
-    NcclWindowGuard wg(comm, winBuf, kOneMB, &win, NCCL_WIN_DEFAULT);
+    NcclWindowGuard wg(comm, winBuf, kOneMB, &win, winFlags);
     if(win == nullptr)
     {
         GTEST_SKIP() << "System does not support ncclWindow";
@@ -683,7 +755,17 @@ TEST_F(HostApiTest, PutSignalNullLocalbuff)
     }
     // Rank 1 does not call any collective → no deadlock.
 
-    TEST_INFO("E1 rank %d: PutSignalNullLocalbuff done.", myRank);
+    TEST_INFO("E1 rank %d: PutSignalNullLocalbuff done (winFlags=0x%x).", myRank, winFlags);
+}
+
+TEST_F(HostApiTest, PutSignalNullLocalbuff)
+{
+    runPutSignalNullLocalbuff(this, NCCL_WIN_DEFAULT);
+}
+
+TEST_F(HostApiTest, PutSignalNullLocalbuffSymmetric)
+{
+    runPutSignalNullLocalbuff(this, NCCL_WIN_COLL_SYMMETRIC);
 }
 
 // ============================================================================
@@ -696,16 +778,16 @@ TEST_F(HostApiTest, PutSignalNullLocalbuff)
  *
  * Non-collective: only rank 0 calls the API.
  */
-TEST_F(HostApiTest, PutSignalNullWindow)
+static void runPutSignalNullWindow(HostApiTest* self, int winFlags)
 {
-    if(!validateTestPrerequisites(/*min=*/2, /*max=*/2))
+    if(!self->validateTestPrerequisites(/*min=*/2, /*max=*/2))
     {
         GTEST_SKIP() << "Need exactly 2 MPI processes";
     }
 
-    const int    myRank = rank();
-    ncclComm_t   comm   = getActiveCommunicator();
-    hipStream_t  stream = getActiveStream();
+    const int    myRank = self->rank();
+    ncclComm_t   comm   = self->getActiveCommunicator();
+    hipStream_t  stream = self->getActiveStream();
 
     // Allocate a valid source buffer on rank 0.
     void* srcBuf = nullptr;
@@ -731,7 +813,17 @@ TEST_F(HostApiTest, PutSignalNullWindow)
             << "E2: expected error for null peerWin, got ncclSuccess";
     }
 
-    TEST_INFO("E2 rank %d: PutSignalNullWindow done.", myRank);
+    TEST_INFO("E2 rank %d: PutSignalNullWindow done (winFlags=0x%x).", myRank, winFlags);
+}
+
+TEST_F(HostApiTest, PutSignalNullWindow)
+{
+    runPutSignalNullWindow(this, NCCL_WIN_DEFAULT);
+}
+
+TEST_F(HostApiTest, PutSignalNullWindowSymmetric)
+{
+    runPutSignalNullWindow(this, NCCL_WIN_COLL_SYMMETRIC);
 }
 
 // ============================================================================
@@ -745,23 +837,23 @@ TEST_F(HostApiTest, PutSignalNullWindow)
  * Both ranks register a 1 MiB window.  Rank 0 attempts a PUT at offset
  * equal to the window size (one byte past the end).
  */
-TEST_F(HostApiTest, PutSignalOffsetOutOfBounds)
+static void runPutSignalOffsetOutOfBounds(HostApiTest* self, int winFlags)
 {
-    if(!validateTestPrerequisites(/*min=*/2, /*max=*/2))
+    if(!self->validateTestPrerequisites(/*min=*/2, /*max=*/2))
     {
         GTEST_SKIP() << "Need exactly 2 MPI processes";
     }
 
-    const int    myRank = rank();
-    ncclComm_t   comm   = getActiveCommunicator();
-    hipStream_t  stream = getActiveStream();
+    const int    myRank = self->rank();
+    ncclComm_t   comm   = self->getActiveCommunicator();
+    hipStream_t  stream = self->getActiveStream();
 
     void* winBuf = nullptr;
     ASSERT_MPI_EQ(ncclSuccess, allocFineGrainBuffer(&winBuf, kOneMB));
     auto winBufGuard = makeScopeGuard([&]() { freeFineGrainBuffer(winBuf); });
 
     ncclWindow_t win = nullptr;
-    NcclWindowGuard wg(comm, winBuf, kOneMB, &win, NCCL_WIN_DEFAULT);
+    NcclWindowGuard wg(comm, winBuf, kOneMB, &win, winFlags);
     if(win == nullptr)
     {
         GTEST_SKIP() << "System does not support ncclWindow";
@@ -787,7 +879,17 @@ TEST_F(HostApiTest, PutSignalOffsetOutOfBounds)
             << "E3: expected error for out-of-bounds offset, got ncclSuccess";
     }
 
-    TEST_INFO("E3 rank %d: PutSignalOffsetOutOfBounds done.", myRank);
+    TEST_INFO("E3 rank %d: PutSignalOffsetOutOfBounds done (winFlags=0x%x).", myRank, winFlags);
+}
+
+TEST_F(HostApiTest, PutSignalOffsetOutOfBounds)
+{
+    runPutSignalOffsetOutOfBounds(this, NCCL_WIN_DEFAULT);
+}
+
+TEST_F(HostApiTest, PutSignalOffsetOutOfBoundsSymmetric)
+{
+    runPutSignalOffsetOutOfBounds(this, NCCL_WIN_COLL_SYMMETRIC);
 }
 
 // ============================================================================
@@ -800,23 +902,23 @@ TEST_F(HostApiTest, PutSignalOffsetOutOfBounds)
  *
  * Non-collective: only rank 0 calls the API.  Skip if not validated.
  */
-TEST_F(HostApiTest, PutSignalInvalidSigIdx)
+static void runPutSignalInvalidSigIdx(HostApiTest* self, int winFlags)
 {
-    if(!validateTestPrerequisites(/*min=*/2, /*max=*/2))
+    if(!self->validateTestPrerequisites(/*min=*/2, /*max=*/2))
     {
         GTEST_SKIP() << "Need exactly 2 MPI processes";
     }
 
-    const int    myRank = rank();
-    ncclComm_t   comm   = getActiveCommunicator();
-    hipStream_t  stream = getActiveStream();
+    const int    myRank = self->rank();
+    ncclComm_t   comm   = self->getActiveCommunicator();
+    hipStream_t  stream = self->getActiveStream();
 
     void* winBuf = nullptr;
     ASSERT_MPI_EQ(ncclSuccess, allocFineGrainBuffer(&winBuf, kOneMB));
     auto winBufGuard = makeScopeGuard([&]() { freeFineGrainBuffer(winBuf); });
 
     ncclWindow_t win = nullptr;
-    NcclWindowGuard wg(comm, winBuf, kOneMB, &win, NCCL_WIN_DEFAULT);
+    NcclWindowGuard wg(comm, winBuf, kOneMB, &win, winFlags);
     if(win == nullptr)
     {
         GTEST_SKIP() << "System does not support ncclWindow";
@@ -840,7 +942,17 @@ TEST_F(HostApiTest, PutSignalInvalidSigIdx)
             << "E4: expected error for sigIdx=1, got ncclSuccess";
     }
 
-    TEST_INFO("E4 rank %d: PutSignalInvalidSigIdx done.", myRank);
+    TEST_INFO("E4 rank %d: PutSignalInvalidSigIdx done (winFlags=0x%x).", myRank, winFlags);
+}
+
+TEST_F(HostApiTest, PutSignalInvalidSigIdx)
+{
+    runPutSignalInvalidSigIdx(this, NCCL_WIN_DEFAULT);
+}
+
+TEST_F(HostApiTest, PutSignalInvalidSigIdxSymmetric)
+{
+    runPutSignalInvalidSigIdx(this, NCCL_WIN_COLL_SYMMETRIC);
 }
 
 // ============================================================================
@@ -856,16 +968,16 @@ TEST_F(HostApiTest, PutSignalInvalidSigIdx)
  * Rank 1 waits with opCnt=2 (fence: 1 PUT + 1 SIGNAL).
  * After sync rank 1 verifies the PUT data.
  */
-TEST_F(HostApiTest, SignalCumulativeFence)
+static void runSignalCumulativeFence(HostApiTest* self, int winFlags)
 {
-    if(!validateTestPrerequisites(/*min=*/2))
+    if(!self->validateTestPrerequisites(/*min=*/2))
     {
         GTEST_SKIP() << "Need at least 2 MPI processes";
     }
 
-    const int    myRank = rank();
-    ncclComm_t   comm   = getActiveCommunicator();
-    hipStream_t  stream = getActiveStream();
+    const int    myRank = self->rank();
+    ncclComm_t   comm   = self->getActiveCommunicator();
+    hipStream_t  stream = self->getActiveStream();
     const size_t kSize  = 256;
     // Window large enough for both send region (rank 0) and recv region (rank 1).
     // kSendOffset=0, kRecvOffset=kTransferSize.
@@ -876,7 +988,7 @@ TEST_F(HostApiTest, SignalCumulativeFence)
     auto winBufGuard = makeScopeGuard([&]() { freeFineGrainBuffer(winBuf); });
 
     ncclWindow_t win = nullptr;
-    NcclWindowGuard wg(comm, winBuf, kWinSize, &win, NCCL_WIN_DEFAULT);
+    NcclWindowGuard wg(comm, winBuf, kWinSize, &win, winFlags);
     if(win == nullptr)
     {
         GTEST_SKIP() << "System does not support ncclWindow";
@@ -920,7 +1032,17 @@ TEST_F(HostApiTest, SignalCumulativeFence)
               VerifyBuf(static_cast<uint8_t*>(winBuf) + kRecvOffset, kSize, /*senderRank=*/0);
     ASSERT_MPI_TRUE(ok);
 
-    TEST_INFO("S2 rank %d: SignalCumulativeFence passed.", myRank);
+    TEST_INFO("S2 rank %d: SignalCumulativeFence passed (winFlags=0x%x).", myRank, winFlags);
+}
+
+TEST_F(HostApiTest, SignalCumulativeFence)
+{
+    runSignalCumulativeFence(this, NCCL_WIN_DEFAULT);
+}
+
+TEST_F(HostApiTest, SignalCumulativeFenceSymmetric)
+{
+    runSignalCumulativeFence(this, NCCL_WIN_COLL_SYMMETRIC);
 }
 
 // ============================================================================
@@ -938,16 +1060,16 @@ TEST_F(HostApiTest, SignalCumulativeFence)
  * Window layout: [0..kSize) and [4096..4096+kSize) are receive slots for rank 2.
  * Senders carve their send buffer from offset kSendSlot in their own window.
  */
-TEST_F(HostApiTest, MultipleSendersOneReceiver)
+static void runMultipleSendersOneReceiver(HostApiTest* self, int winFlags)
 {
-    if(!validateTestPrerequisites(/*min=*/3))
+    if(!self->validateTestPrerequisites(/*min=*/3))
     {
         GTEST_SKIP() << "Need at least 3 MPI processes";
     }
 
-    const int    myRank   = rank();
-    ncclComm_t   comm     = getActiveCommunicator();
-    hipStream_t  stream   = getActiveStream();
+    const int    myRank   = self->rank();
+    ncclComm_t   comm     = self->getActiveCommunicator();
+    hipStream_t  stream   = self->getActiveStream();
     const size_t kSize    = 256;
     // 8192 covers the two recv slots at 0 and 4096; add kSize more for the send
     // region so senders can carve from their own window beyond the recv area.
@@ -960,7 +1082,7 @@ TEST_F(HostApiTest, MultipleSendersOneReceiver)
     auto winBufGuard = makeScopeGuard([&]() { freeFineGrainBuffer(winBuf); });
 
     ncclWindow_t win = nullptr;
-    NcclWindowGuard wg(comm, winBuf, kWinSize, &win, NCCL_WIN_DEFAULT);
+    NcclWindowGuard wg(comm, winBuf, kWinSize, &win, winFlags);
     if(win == nullptr)
     {
         GTEST_SKIP() << "System does not support ncclWindow";
@@ -1010,7 +1132,17 @@ TEST_F(HostApiTest, MultipleSendersOneReceiver)
     }
     ASSERT_MPI_TRUE(allOk);
 
-    TEST_INFO("WS3 rank %d: MultipleSendersOneReceiver passed.", myRank);
+    TEST_INFO("WS3 rank %d: MultipleSendersOneReceiver passed (winFlags=0x%x).", myRank, winFlags);
+}
+
+TEST_F(HostApiTest, MultipleSendersOneReceiver)
+{
+    runMultipleSendersOneReceiver(this, NCCL_WIN_DEFAULT);
+}
+
+TEST_F(HostApiTest, MultipleSendersOneReceiverSymmetric)
+{
+    runMultipleSendersOneReceiver(this, NCCL_WIN_COLL_SYMMETRIC);
 }
 
 // ============================================================================
@@ -1026,16 +1158,16 @@ TEST_F(HostApiTest, MultipleSendersOneReceiver)
  *
  * Window layout matches WS3: recv slots at 0 and 4096; send region at kSendSlot.
  */
-TEST_F(HostApiTest, WaitSignalMultipleDescriptors)
+static void runWaitSignalMultipleDescriptors(HostApiTest* self, int winFlags)
 {
-    if(!validateTestPrerequisites(/*min=*/3))
+    if(!self->validateTestPrerequisites(/*min=*/3))
     {
         GTEST_SKIP() << "Need at least 3 MPI processes";
     }
 
-    const int    myRank   = rank();
-    ncclComm_t   comm     = getActiveCommunicator();
-    hipStream_t  stream   = getActiveStream();
+    const int    myRank   = self->rank();
+    ncclComm_t   comm     = self->getActiveCommunicator();
+    hipStream_t  stream   = self->getActiveStream();
     const size_t kSize    = 256;
     const size_t kSendSlot = 8192;
     const size_t kWinSize  = kSendSlot + kSize;
@@ -1045,7 +1177,7 @@ TEST_F(HostApiTest, WaitSignalMultipleDescriptors)
     auto winBufGuard = makeScopeGuard([&]() { freeFineGrainBuffer(winBuf); });
 
     ncclWindow_t win = nullptr;
-    NcclWindowGuard wg(comm, winBuf, kWinSize, &win, NCCL_WIN_DEFAULT);
+    NcclWindowGuard wg(comm, winBuf, kWinSize, &win, winFlags);
     if(win == nullptr)
     {
         GTEST_SKIP() << "System does not support ncclWindow";
@@ -1093,7 +1225,17 @@ TEST_F(HostApiTest, WaitSignalMultipleDescriptors)
     }
     ASSERT_MPI_TRUE(allOk);
 
-    TEST_INFO("WS4 rank %d: WaitSignalMultipleDescriptors passed.", myRank);
+    TEST_INFO("WS4 rank %d: WaitSignalMultipleDescriptors passed (winFlags=0x%x).", myRank, winFlags);
+}
+
+TEST_F(HostApiTest, WaitSignalMultipleDescriptors)
+{
+    runWaitSignalMultipleDescriptors(this, NCCL_WIN_DEFAULT);
+}
+
+TEST_F(HostApiTest, WaitSignalMultipleDescriptorsSymmetric)
+{
+    runWaitSignalMultipleDescriptors(this, NCCL_WIN_COLL_SYMMETRIC);
 }
 
 // ============================================================================
@@ -1108,16 +1250,16 @@ TEST_F(HostApiTest, WaitSignalMultipleDescriptors)
  * limited fine-grain / pinned memory capacity while still exercising a
  * large-transfer code path.
  */
-TEST_F(HostApiTest, LargePut)
+static void runLargePut(HostApiTest* self, int winFlags)
 {
-    if(!validateTestPrerequisites(/*min=*/2))
+    if(!self->validateTestPrerequisites(/*min=*/2))
     {
         GTEST_SKIP() << "Need at least 2 MPI processes";
     }
 
-    const int    myRank  = rank();
-    ncclComm_t   comm    = getActiveCommunicator();
-    hipStream_t  stream  = getActiveStream();
+    const int    myRank  = self->rank();
+    ncclComm_t   comm    = self->getActiveCommunicator();
+    hipStream_t  stream  = self->getActiveStream();
 
     // 256 MiB — large but avoids OOM on most ROCm systems.
     const size_t kLargeSize = 256ULL * 1024 * 1024;
@@ -1128,7 +1270,7 @@ TEST_F(HostApiTest, LargePut)
     auto winBufGuard = makeScopeGuard([&]() { freeFineGrainBuffer(winBuf); });
 
     ncclWindow_t win = nullptr;
-    NcclWindowGuard wg(comm, winBuf, kLargeSize, &win, NCCL_WIN_DEFAULT);
+    NcclWindowGuard wg(comm, winBuf, kLargeSize, &win, winFlags);
     if(win == nullptr)
     {
         GTEST_SKIP() << "System does not support ncclWindow";
@@ -1158,7 +1300,17 @@ TEST_F(HostApiTest, LargePut)
     bool ok = (myRank != 1) || AllSentinel(winBuf, kLargeSize, kByte);
     ASSERT_MPI_TRUE(ok);
 
-    TEST_INFO("P4 rank %d: LargePut passed.", myRank);
+    TEST_INFO("P4 rank %d: LargePut passed (winFlags=0x%x).", myRank, winFlags);
+}
+
+TEST_F(HostApiTest, LargePut)
+{
+    runLargePut(this, NCCL_WIN_DEFAULT);
+}
+
+TEST_F(HostApiTest, LargePutSymmetric)
+{
+    runLargePut(this, NCCL_WIN_COLL_SYMMETRIC);
 }
 
 // ============================================================================
@@ -1173,17 +1325,17 @@ TEST_F(HostApiTest, LargePut)
  * own rank pattern, PUTs to the next rank (offset 0), then waits for the
  * previous rank's signal.  After sync each rank verifies the received data.
  */
-TEST_F(HostApiTest, AllToAllPut)
+static void runAllToAllPut(HostApiTest* self, int winFlags)
 {
-    if(!validateTestPrerequisites(/*min=*/2))
+    if(!self->validateTestPrerequisites(/*min=*/2))
     {
         GTEST_SKIP() << "Need at least 2 MPI processes";
     }
 
-    const int    myRank   = rank();
-    const int    nRanks_  = nRanks();
-    ncclComm_t   comm     = getActiveCommunicator();
-    hipStream_t  stream   = getActiveStream();
+    const int    myRank   = self->rank();
+    const int    nRanks_  = self->nRanks();
+    ncclComm_t   comm     = self->getActiveCommunicator();
+    hipStream_t  stream   = self->getActiveStream();
     const size_t kSize    = 256;
     // Window layout: [0..kSize) = recv slot; [kSize..2*kSize) = send region.
     // Both fit within 4096, so kWinSize=4096 is fine.
@@ -1200,7 +1352,7 @@ TEST_F(HostApiTest, AllToAllPut)
     auto winBufGuard = makeScopeGuard([&]() { freeFineGrainBuffer(winBuf); });
 
     ncclWindow_t win = nullptr;
-    NcclWindowGuard wg(comm, winBuf, kWinSize, &win, NCCL_WIN_DEFAULT);
+    NcclWindowGuard wg(comm, winBuf, kWinSize, &win, winFlags);
     if(win == nullptr)
     {
         GTEST_SKIP() << "System does not support ncclWindow";
@@ -1229,7 +1381,18 @@ TEST_F(HostApiTest, AllToAllPut)
     bool ok = VerifyBuf(static_cast<uint8_t*>(winBuf) + kRecvSlot, kSize, recvFrom);
     ASSERT_MPI_TRUE(ok);
 
-    TEST_INFO("P5 rank %d: AllToAllPut passed (recv from rank %d).", myRank, recvFrom);
+    TEST_INFO("P5 rank %d: AllToAllPut passed (recv from rank %d, winFlags=0x%x).",
+              myRank, recvFrom, winFlags);
+}
+
+TEST_F(HostApiTest, AllToAllPut)
+{
+    runAllToAllPut(this, NCCL_WIN_DEFAULT);
+}
+
+TEST_F(HostApiTest, AllToAllPutSymmetric)
+{
+    runAllToAllPut(this, NCCL_WIN_COLL_SYMMETRIC);
 }
 
 // ============================================================================
@@ -1243,16 +1406,16 @@ TEST_F(HostApiTest, AllToAllPut)
  * Each ncclPutSignal implicitly delivers a signal.  Two calls = opCnt 2.
  * Rank 1 verifies both data regions after sync.
  */
-TEST_F(HostApiTest, SignalImpliesPriorPutsDelivered)
+static void runSignalImpliesPriorPutsDelivered(HostApiTest* self, int winFlags)
 {
-    if(!validateTestPrerequisites(/*min=*/2))
+    if(!self->validateTestPrerequisites(/*min=*/2))
     {
         GTEST_SKIP() << "Need at least 2 MPI processes";
     }
 
-    const int    myRank  = rank();
-    ncclComm_t   comm    = getActiveCommunicator();
-    hipStream_t  stream  = getActiveStream();
+    const int    myRank  = self->rank();
+    ncclComm_t   comm    = self->getActiveCommunicator();
+    hipStream_t  stream  = self->getActiveStream();
     const size_t kSize   = 256;
     const size_t kWinSize = kOneMB;
 
@@ -1261,7 +1424,7 @@ TEST_F(HostApiTest, SignalImpliesPriorPutsDelivered)
     auto winBufGuard = makeScopeGuard([&]() { freeFineGrainBuffer(winBuf); });
 
     ncclWindow_t win = nullptr;
-    NcclWindowGuard wg(comm, winBuf, kWinSize, &win, NCCL_WIN_DEFAULT);
+    NcclWindowGuard wg(comm, winBuf, kWinSize, &win, winFlags);
     if(win == nullptr)
     {
         GTEST_SKIP() << "System does not support ncclWindow";
@@ -1308,7 +1471,17 @@ TEST_F(HostApiTest, SignalImpliesPriorPutsDelivered)
     }
     ASSERT_MPI_TRUE(allOk);
 
-    TEST_INFO("O2 rank %d: SignalImpliesPriorPutsDelivered passed.", myRank);
+    TEST_INFO("O2 rank %d: SignalImpliesPriorPutsDelivered passed (winFlags=0x%x).", myRank, winFlags);
+}
+
+TEST_F(HostApiTest, SignalImpliesPriorPutsDelivered)
+{
+    runSignalImpliesPriorPutsDelivered(this, NCCL_WIN_DEFAULT);
+}
+
+TEST_F(HostApiTest, SignalImpliesPriorPutsDeliveredSymmetric)
+{
+    runSignalImpliesPriorPutsDelivered(this, NCCL_WIN_COLL_SYMMETRIC);
 }
 
 // ============================================================================
@@ -1322,23 +1495,23 @@ TEST_F(HostApiTest, SignalImpliesPriorPutsDelivered)
  * Non-collective: only rank 0 calls the API.  Skip if argcheck is not
  * implemented (i.e., the call returns ncclSuccess).
  */
-TEST_F(HostApiTest, PutSignalInvalidCtx)
+static void runPutSignalInvalidCtx(HostApiTest* self, int winFlags)
 {
-    if(!validateTestPrerequisites(/*min=*/2))
+    if(!self->validateTestPrerequisites(/*min=*/2))
     {
         GTEST_SKIP() << "Need at least 2 MPI processes";
     }
 
-    const int    myRank = rank();
-    ncclComm_t   comm   = getActiveCommunicator();
-    hipStream_t  stream = getActiveStream();
+    const int    myRank = self->rank();
+    ncclComm_t   comm   = self->getActiveCommunicator();
+    hipStream_t  stream = self->getActiveStream();
 
     void* winBuf = nullptr;
     ASSERT_MPI_EQ(ncclSuccess, allocFineGrainBuffer(&winBuf, kOneMB));
     auto winBufGuard = makeScopeGuard([&]() { freeFineGrainBuffer(winBuf); });
 
     ncclWindow_t win = nullptr;
-    NcclWindowGuard wg(comm, winBuf, kOneMB, &win, NCCL_WIN_DEFAULT);
+    NcclWindowGuard wg(comm, winBuf, kOneMB, &win, winFlags);
     if(win == nullptr)
     {
         GTEST_SKIP() << "System does not support ncclWindow";
@@ -1357,7 +1530,17 @@ TEST_F(HostApiTest, PutSignalInvalidCtx)
     }
     // Rank 1 does not participate in this non-collective error path.
 
-    TEST_INFO("E5 rank %d: PutSignalInvalidCtx done.", myRank);
+    TEST_INFO("E5 rank %d: PutSignalInvalidCtx done (winFlags=0x%x).", myRank, winFlags);
+}
+
+TEST_F(HostApiTest, PutSignalInvalidCtx)
+{
+    runPutSignalInvalidCtx(this, NCCL_WIN_DEFAULT);
+}
+
+TEST_F(HostApiTest, PutSignalInvalidCtxSymmetric)
+{
+    runPutSignalInvalidCtx(this, NCCL_WIN_COLL_SYMMETRIC);
 }
 
 // ============================================================================
@@ -1370,11 +1553,11 @@ TEST_F(HostApiTest, PutSignalInvalidCtx)
  *
  * Each rank calls independently (non-collective).  Skip if not validated.
  */
-TEST_F(HostApiTest, WaitSignalNullDescs)
+static void runWaitSignalNullDescs(HostApiTest* self, int /*winFlags*/)
 {
-    const int    myRank = rank();
-    ncclComm_t   comm   = getActiveCommunicator();
-    hipStream_t  stream = getActiveStream();
+    const int    myRank = self->rank();
+    ncclComm_t   comm   = self->getActiveCommunicator();
+    hipStream_t  stream = self->getActiveStream();
 
     ncclResult_t res = ncclWaitSignal(/*nDesc=*/1, /*signalDescs=*/nullptr, comm, stream);
 
@@ -1382,6 +1565,16 @@ TEST_F(HostApiTest, WaitSignalNullDescs)
         << "E6: expected ncclInvalidArgument for null descs with nDesc=1";
 
     TEST_INFO("E6 rank %d: WaitSignalNullDescs done.", myRank);
+}
+
+TEST_F(HostApiTest, WaitSignalNullDescs)
+{
+    runWaitSignalNullDescs(this, NCCL_WIN_DEFAULT);
+}
+
+TEST_F(HostApiTest, WaitSignalNullDescsSymmetric)
+{
+    runWaitSignalNullDescs(this, NCCL_WIN_COLL_SYMMETRIC);
 }
 
 // ============================================================================
@@ -1395,11 +1588,11 @@ TEST_F(HostApiTest, WaitSignalNullDescs)
  * Expect ncclSuccess (or ncclInvalidArgument — both are acceptable).
  * No stream sync or data transfer involved.
  */
-TEST_F(HostApiTest, WaitSignalZeroDesc)
+static void runWaitSignalZeroDesc(HostApiTest* self, int /*winFlags*/)
 {
-    const int    myRank = rank();
-    ncclComm_t   comm   = getActiveCommunicator();
-    hipStream_t  stream = getActiveStream();
+    const int    myRank = self->rank();
+    ncclComm_t   comm   = self->getActiveCommunicator();
+    hipStream_t  stream = self->getActiveStream();
 
     ncclResult_t res = ncclWaitSignal(/*nDesc=*/0, /*signalDescs=*/nullptr, comm, stream);
     EXPECT_TRUE(res == ncclSuccess || res == ncclInvalidArgument)
@@ -1407,6 +1600,16 @@ TEST_F(HostApiTest, WaitSignalZeroDesc)
         << static_cast<int>(res);
 
     TEST_INFO("E7 rank %d: WaitSignalZeroDesc done (result=%d).", myRank, static_cast<int>(res));
+}
+
+TEST_F(HostApiTest, WaitSignalZeroDesc)
+{
+    runWaitSignalZeroDesc(this, NCCL_WIN_DEFAULT);
+}
+
+TEST_F(HostApiTest, WaitSignalZeroDescSymmetric)
+{
+    runWaitSignalZeroDesc(this, NCCL_WIN_COLL_SYMMETRIC);
 }
 
 } // namespace RcclUnitTesting
