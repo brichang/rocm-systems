@@ -8,6 +8,13 @@ Known issues
 
 This page documents known issues with hipFile.
 
+hipFile uses fallback path on logical volumes and md devices
+============================================================
+
+Fastpath is not supported on logical volumes or md devices.
+
+There is no workaround.
+
 Fastpath is disabled on SR-IOV Virtual Functions
 ================================================
 
