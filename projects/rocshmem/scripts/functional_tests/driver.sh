@@ -152,6 +152,12 @@ declare -A TEST_NUMBERS=(
   ["tile_get_arbitrary"]="116"
   ["reduce_on_stream"]="117"
   ["host_ctx_create"]="118"
+  ["tile_broadcast"]="119"
+  ["tile_broadcast_wave"]="120"
+  ["tile_broadcast_wg"]="121"
+  ["tile_allgather"]="122"
+  ["tile_allgather_wave"]="123"
+  ["tile_allgather_wg"]="124"
 )
 
 ExecTest() {
@@ -693,6 +699,18 @@ TestTiles() {
   ExecTest  "tile_put_1d"               2       1            1
   ExecTest  "tile_get_1d"               2       1            1
   ExecTest  "tile_get_wave_contiguous"  2       1            $WAVE_SIZE
+  ExecTest  "tile_broadcast"            2       1            1
+  ExecTest  "tile_broadcast"            4       1            1
+  ExecTest  "tile_broadcast_wave"       2       1            $WAVE_SIZE
+  ExecTest  "tile_broadcast_wave"       4       1            $WAVE_SIZE
+  ExecTest  "tile_broadcast_wg"         2       4            $WAVE_SIZE
+  ExecTest  "tile_broadcast_wg"         4       4            $WAVE_SIZE
+  ExecTest  "tile_allgather"            2       1            1
+  ExecTest  "tile_allgather"            4       1            1
+  ExecTest  "tile_allgather_wave"       2       1            $WAVE_SIZE
+  ExecTest  "tile_allgather_wave"       4       1            $WAVE_SIZE
+  ExecTest  "tile_allgather_wg"         2       4            $WAVE_SIZE
+  ExecTest  "tile_allgather_wg"         4       4            $WAVE_SIZE
 }
 
 TestHeatMapRMA() {

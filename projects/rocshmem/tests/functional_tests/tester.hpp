@@ -160,7 +160,13 @@
   X(TileGetColumnMajor,        115)  \
   X(TileGetArbitrary,          116)  \
   X(ReduceOnStream,            117)  \
-  X(HostCtxCreate,             118) 
+  X(HostCtxCreate,             118)  \
+  X(TileBroadcast,             119)  \
+  X(TileBroadcastWave,         120)  \
+  X(TileBroadcastWG,           121)  \
+  X(TileAllgather,             122)  \
+  X(TileAllgatherWave,         123)  \
+  X(TileAllgatherWG,           124)
 #define _ROCSHMEM_ENUM_ENTRY(name, val) name##TestType = val,
 enum TestType {
   ROCSHMEM_FOREACH_TEST_TYPE(_ROCSHMEM_ENUM_ENTRY)
