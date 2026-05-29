@@ -364,7 +364,12 @@ KfdDriver::AllocateMemory(const core::MemoryRegion &mem_region,
     const bool is_resident = MakeKfdMemoryResident(
         map_node_count, map_node_id, *mem, size, &alternate_va, map_flag);
 
+    // On Windows/DXG, allow allocations to succeed even if MakeResident
+    // is best-effort; WDDM will demand-page on GPU access.
+    const bool is_dxg =
+        core::Runtime::runtime_singleton_->thunkLoader()->IsDXG();
     const bool require_pinning =
+        !is_dxg &&
         (!m_region.full_profile() || m_region.IsLocalMemory() ||
          m_region.IsScratch());
 
