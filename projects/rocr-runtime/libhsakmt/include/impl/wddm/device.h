@@ -211,6 +211,11 @@ public:
 	       int count, bool wait_any);
   bool WaitOnPagingFenceFromCpu();
 
+  // GPU-side wait on the paging fence: submits a wait packet to the
+  // given HW queue so the GPU stalls until WDDM finishes any in-flight
+  // paging (matches PAL's WaitOnPagingFenceFromGpu).
+  bool SubmitWaitForPagingFenceToHwQueue(D3DKMT_HANDLE hw_queue);
+
   uint32_t LdsBlocks(const hsa_kernel_dispatch_packet_t *pkt);
   uint32_t GetCmdbufSize(void) const { return cmdbuf_size_; }
   uint32_t GetAqlFrameSize(void) const { return cmdbuf_aql_frame_size_; }

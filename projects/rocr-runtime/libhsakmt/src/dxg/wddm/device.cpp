@@ -532,6 +532,26 @@ bool WDDMDevice::WaitOnPagingFenceFromCpu() {
   return false;
 }
 
+bool WDDMDevice::SubmitWaitForPagingFenceToHwQueue(D3DKMT_HANDLE hw_queue) {
+  const uint64_t fence_value = page_fence_value_.load(std::memory_order_acquire);
+  if (fence_value == 0) {
+    return true;
+  }
+  D3DKMT_SUBMITWAITFORSYNCOBJECTSTOHWQUEUE args = {};
+  args.hHwQueue          = hw_queue;
+  args.ObjectCount       = 1;
+  args.ObjectHandleArray = &page_syncobj_;
+  args.FenceValueArray   = &fence_value;
+  NTSTATUS ret = DXCORE_CALL(D3DKMTSubmitWaitForSyncObjectsToHwQueue(&args));
+  if (ret != STATUS_SUCCESS) {
+    pr_err("SubmitWaitForPagingFenceToHwQueue: fence=%llu, status=0x%x\n",
+           static_cast<unsigned long long>(fence_value),
+           static_cast<unsigned int>(ret));
+    return false;
+  }
+  return true;
+}
+
 bool WDDMDevice::CreateSyncobj(D3DKMT_HANDLE *handle, uint64_t **addr) {
   D3DKMT_CREATESYNCHRONIZATIONOBJECT2 args = {0};
   args.hDevice = device_;
@@ -882,6 +902,12 @@ bool WDDMDevice::SubmitToHwQueue(WDDMQueue *queue, uint64_t command_addr,
   args.pPrivateDriverData = priv_data;
   args.PrivateDriverDataSize = priv_size;
 
+  // GPU-side wait on outstanding paging fence before submitting the command.
+  if (!SubmitWaitForPagingFenceToHwQueue(queue->queue)) {
+    free(priv_data);
+    return false;
+  }
+
   NTSTATUS ret = DXCORE_CALL(D3DKMTSubmitCommandToHwQueue(&args));
   if (ret != STATUS_SUCCESS) {
     pr_err("fail %x\n", ret);
@@ -932,6 +958,10 @@ bool WDDMDevice::SubmitToAqlQueue(WDDMQueue* queue, uint64_t command_addr, uint6
       .CommandLength = static_cast<UINT>(command_size),
       .PrivateDriverDataSize = static_cast<UINT>(priv_size),
       .pPrivateDriverData = priv_data};
+  // GPU-side wait on outstanding paging fence before submitting the AQL command.
+  if (!SubmitWaitForPagingFenceToHwQueue(queue->queue)) {
+    return false;
+  }
   NTSTATUS ret = DXCORE_CALL(D3DKMTSubmitCommandToHwQueue(&args));
   if (ret != STATUS_SUCCESS) {
     pr_err("fail %x\n", ret);

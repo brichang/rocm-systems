@@ -52,7 +52,8 @@ DxcoreLoader::DxcoreLoader()
     , pfn_D3DKMTSubmitCommandToHwQueue(nullptr)
     , pfn_D3DKMTEnumAdapters3(nullptr)
     , pfn_D3DKMTQueryResourceInfo(nullptr)
-    , pfn_D3DKMTOpenResource(nullptr) {
+    , pfn_D3DKMTOpenResource(nullptr)
+    , pfn_D3DKMTSubmitWaitForSyncObjectsToHwQueue(nullptr) {
 }
 
 DxcoreLoader::~DxcoreLoader() {
@@ -146,6 +147,7 @@ bool DxcoreLoader::LoadDxcoreApis() {
     LOAD_DXCORE_API(D3DKMTCreateHwQueue);
     LOAD_DXCORE_API(D3DKMTDestroyHwQueue);
     LOAD_DXCORE_API(D3DKMTSubmitCommandToHwQueue);
+    LOAD_DXCORE_API(D3DKMTSubmitWaitForSyncObjectsToHwQueue);
 
     #undef LOAD_DXCORE_API
 
