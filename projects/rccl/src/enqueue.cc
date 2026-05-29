@@ -3169,7 +3169,10 @@ static ncclResult_t rmaTaskAppend(
       return ncclInvalidArgument;
     }
 
-    if (comm->symmetricSupport) {
+    // RCCL: peerWin encoding matches what ncclDevrWindowRegisterInGroup
+    // produced: shadow pool entry for sym VMM and IPC, type-pun for proxy-only.
+    bool useShadowPool = comm->symmetricSupport || comm->devrState.lsaSize > 1;
+    if (useShadowPool) {
       struct ncclWindow_vidmem* peerWinDevHost = NULL;
       NCCLCHECK(ncclShadowPoolToHost(&comm->devrState.shadows, info->peerWin, &peerWinDevHost));
       peerWinHost = (struct ncclDevrWindow*)peerWinDevHost->winHost;
@@ -3187,23 +3190,21 @@ static ncclResult_t rmaTaskAppend(
       WARN("ncclPutSignal: peerWinOffset %zu is greater than peerWin size %zu", info->peerWinOffset, peerWinHost->size);
       return ncclInvalidArgument;
     }
-    if (comm->symmetricSupport) {
-      NCCLCHECK(ncclDevrFindWindow(comm, srcBuff, &srcWinHost));
-      if (srcWinHost == NULL || !(srcWinHost->winFlags & NCCL_WIN_COLL_SYMMETRIC)) {
-        WARN("ncclPutSignal: srcWinHost is not in a valid symmetric window");
-        return ncclInvalidArgument;
-      }
-      srcWinOffset = (char*)srcBuff - (char*)srcWinHost->userPtr;
-    } else {
-      // hostRmaSupport path: source buffer must be inside a registered window so
-      // the GIN proxy can resolve its MR handle.  Look it up the same way.
-      NCCLCHECK(ncclDevrFindWindow(comm, srcBuff, &srcWinHost));
-      if (srcWinHost == NULL) {
-        WARN("ncclPutSignal: srcBuff is not inside a registered ncclWindow");
-        return ncclInvalidArgument;
-      }
-      srcWinOffset = (char*)srcBuff - (char*)srcWinHost->userPtr;
+
+    // RCCL: Source buffer must be inside a registered window. The winFlags
+    // symmetric hint is enforced only on the sym VMM path (user contract:
+    // offsets symmetric across ranks); IPC and proxy do not require the flag.
+    NCCLCHECK(ncclDevrFindWindow(comm, srcBuff, &srcWinHost));
+    if (srcWinHost == NULL) {
+      WARN("ncclPutSignal: srcBuff is not inside a registered ncclWindow");
+      return ncclInvalidArgument;
     }
+    if (comm->symmetricSupport &&
+        !(srcWinHost->winFlags & NCCL_WIN_COLL_SYMMETRIC)) {
+      WARN("ncclPutSignal: srcWinHost is not in a valid symmetric window");
+      return ncclInvalidArgument;
+    }
+    srcWinOffset = (char*)srcBuff - (char*)srcWinHost->userPtr;
 
     bool isMultiSegment = ncclDevrWindowIsMultiSegment(srcWinHost) || ncclDevrWindowIsMultiSegment(peerWinHost);
     bool hasSysmemSegment = ncclDevrWindowHasSysmemSegment(srcWinHost) || ncclDevrWindowHasSysmemSegment(peerWinHost);

@@ -27,6 +27,9 @@ struct ncclDevrWindow {
   struct ncclWindow_vidmem* vidmem;
   void* rmaHostWins[4]; // IB MR handles per GIN connection (proxy-only path)
   ncclGinWindow_t rmaDevWins[4]; // device-side GIN window handles (proxy-only path)
+  // IPC layer (NULL when inactive). Both arrays sized devrState.lsaSize.
+  void** ipcPeerPtrs;        // peer i's user-region VA in our address space
+  void** ipcPeerOpenedBases; // cudaIpcOpenMemHandle result, kept for Close
 };
 struct ncclDevrWindowSorted;
 struct ncclDevrTeam;
