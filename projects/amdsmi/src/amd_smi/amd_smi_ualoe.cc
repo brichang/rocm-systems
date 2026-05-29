@@ -609,6 +609,8 @@ amdsmi_status_t amdsmi_alloc_fabric_telemetry(amdsmi_processor_handle processor_
   }
 
   // Cast UALoE telemetry directly to AMDSMI telemetry since structures are now binary compatible
+  static_assert(sizeof(amdsmi_fabric_telemetry_t) == sizeof(ualoe_telemetry_t),
+                "amdsmi_fabric_telemetry_t and ualoe_telemetry_t must be binary compatible");
   *telemetry = reinterpret_cast<amdsmi_fabric_telemetry_t*>(ualoe_tel);
 
   return AMDSMI_STATUS_SUCCESS;
