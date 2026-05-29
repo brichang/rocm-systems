@@ -171,12 +171,14 @@ void TestFabricRead::Run(void) {
           // ── amdsmi_fabric_telem_id_to_string ─────────────────────────────
           for (uint32_t item = 0; item < in.item_count; ++item) {
             const auto& it = in.items[item];
-            const char* name = amdsmi_fabric_telem_id_to_string(it.id);
+            const char* name = nullptr;
+            amdsmi_status_t name_ret = amdsmi_fabric_telem_id_to_string(it.id, &name);
             std::cout << "\t\t    [" << item << "] id=0x" << std::hex << it.id << std::dec
                       << "  name=" << (name ? name : "NULL") << "  value=" << it.value << "\n";
 
-            // amdsmi_fabric_telem_id_to_string must return a non-null string
-            // for any valid id obtained from the driver
+            // amdsmi_fabric_telem_id_to_string must succeed and return a
+            // non-null string for any valid id obtained from the driver
+            ASSERT_EQ(name_ret, AMDSMI_STATUS_SUCCESS);
             ASSERT_NE(name, nullptr);
           }
         }
