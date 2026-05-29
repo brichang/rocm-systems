@@ -596,6 +596,16 @@ class TestAmdSmiPython(unittest.TestCase):
         self.common.Test_API_Per_GPU(amdsmi_get_fw_info=amdsmi.amdsmi_get_fw_info)
         return
 
+    def test_get_fabric_telemetry(self):
+        self.common.print_func_name("")
+        self.common.Test_API_Per_GPU(amdsmi_get_fabric_telemetry=amdsmi.amdsmi_get_fabric_telemetry)
+        return
+
+    def test_get_gpu_fabric_info(self):
+        self.common.print_func_name("")
+        self.common.Test_API_Per_GPU(amdsmi_get_gpu_fabric_info=amdsmi.amdsmi_get_gpu_fabric_info)
+        return
+
     def test_get_gpu_accelerator_partition_profile(self):
         self.common.print_func_name("")
         self.common.Test_API_Per_GPU(

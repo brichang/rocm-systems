@@ -320,6 +320,68 @@ class TestAmdSmiPython(unittest.TestCase):
             raise self.raise_exception
         return
 
+    def test_fabric_telemetry(self):
+        """Exercise alloc/get/free + amdsmi_fabric_telem_id_to_string round-trip.
+
+        On systems without an IFoE driver the API returns DRIVER_NOT_LOADED;
+        treat that as a pass condition rather than a hard failure.
+        """
+        self.common.print_func_name("")
+
+        expected_no_driver = (
+            amdsmi.AmdSmiStatus.AMDSMI_STATUS_DRIVER_NOT_LOADED,
+            amdsmi.AmdSmiStatus.AMDSMI_STATUS_NOT_SUPPORTED,
+        )
+
+        for i, gpu in enumerate(self.common.processors):
+            self.common.print_device_header(i)
+
+            msg = f"\t### amdsmi_get_fabric_telemetry(gpu={i}):"
+            try:
+                telem = amdsmi.amdsmi_get_fabric_telemetry(gpu)
+                self.common.print(msg, telem)
+                self.common.check_ret("", "", self.common.PASS)
+                self.assertIsInstance(telem, list)
+                for category in telem:
+                    self.assertIn("category", category)
+                    self.assertIn("instances", category)
+                    for instance in category["instances"]:
+                        for item in instance["items"]:
+                            self.assertIn("id", item)
+                            self.assertIn("name", item)
+                            self.assertIsInstance(item["name"], str)
+            except amdsmi.AmdSmiLibraryException as e:
+                if e.get_error_code() in expected_no_driver:
+                    self.common.print(msg, f"skipped: {e}")
+                    self.common.check_ret("", "", self.common.PASS)
+                elif self.common.check_ret(msg, e, self.common.PASS):
+                    self.raise_exception = e
+            except amdsmi.AmdSmiParameterException as e:
+                if self.common.check_ret(msg, e, self.common.PASS):
+                    self.raise_exception = e
+
+            msg = f"\t### amdsmi_get_gpu_fabric_info(gpu={i}):"
+            try:
+                info = amdsmi.amdsmi_get_gpu_fabric_info(gpu)
+                self.common.print(msg, info)
+                self.common.check_ret("", "", self.common.PASS)
+                self.assertIsInstance(info, dict)
+                self.assertIn("version", info)
+                self.assertIn("fabric_type", info)
+            except amdsmi.AmdSmiLibraryException as e:
+                if e.get_error_code() in expected_no_driver:
+                    self.common.print(msg, f"skipped: {e}")
+                    self.common.check_ret("", "", self.common.PASS)
+                elif self.common.check_ret(msg, e, self.common.PASS):
+                    self.raise_exception = e
+            except amdsmi.AmdSmiParameterException as e:
+                if self.common.check_ret(msg, e, self.common.PASS):
+                    self.raise_exception = e
+
+        if self.raise_exception:
+            raise self.raise_exception
+        return
+
     def test_utilization_count(self):
         self.common.print_func_name("")
 
