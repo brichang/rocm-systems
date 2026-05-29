@@ -54,6 +54,12 @@ GpuMemory::GpuMemory(WDDMDevice *device) : device_(device) {
 }
 
 GpuMemory::~GpuMemory() {
+  // Remove from device residency tracking BEFORE freeing the underlying
+  // allocation to avoid use-after-free in a concurrent
+  // EnsureAllResidentAndWait running on another thread.
+  if (device_) {
+    device_->UnregisterAllocation(this);
+  }
   FreeGpuVirtualAddress(GpuAddress(), Size());
   FreePhysicalMemory();
   if (desc_.handle_ape_addr > 0)
@@ -131,6 +137,16 @@ ErrorCode GpuMemory::Init(const GpuMemoryCreateInfo &create_info) {
   if (!GetDevice()->WaitOnPagingFenceFromCpu())
     code = ErrorCode::Unknown;
 
+  // PAL-equivalent residency tracking: register kLocal (VRAM) and
+  // kUserQueue (VRAM-backed AQL/SWS queue memory) allocations so the
+  // pre-submission EnsureAllResidentAndWait can re-make them resident
+  // as a batch.  kSystem / kUserMemory live in GTT / host RAM and are
+  // not subject to WDDM trim, so skip them.  Only register when
+  // MakeResident genuinely succeeded.
+  if (code == ErrorCode::Success && (IsLocal() || IsUserQueue())) {
+    GetDevice()->RegisterResidentAllocation(this);
+  }
+
   return code;
 }
 // ================================================================================================
@@ -158,6 +174,12 @@ ErrorCode GpuMemory::MapMemoryToVirtualAddress(bool create_phys_mem) {
   if (code != ErrorCode::Success) return code;
 
   if (!GetDevice()->WaitOnPagingFenceFromCpu()) code = ErrorCode::Unknown;
+
+  // PAL-equivalent residency tracking: see comment in Init().  Register
+  // kLocal / kUserQueue only, and only on genuine MakeResident success.
+  if (code == ErrorCode::Success && (IsLocal() || IsUserQueue())) {
+    GetDevice()->RegisterResidentAllocation(this);
+  }
   return code;
 }
 

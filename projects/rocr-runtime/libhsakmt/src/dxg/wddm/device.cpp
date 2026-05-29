@@ -885,6 +885,15 @@ bool WDDMDevice::DestroyHwQueue(WDDMQueue *queue) {
 
 bool WDDMDevice::SubmitToHwQueue(WDDMQueue *queue, uint64_t command_addr,
                                 uint64_t command_size, uint64_t fence_value) {
+  // PAL-equivalent residency: re-make the entire tracked working set
+  // resident in one batched call and wait on the paging fence before
+  // submitting.  This must run before any other paging-fence handling
+  // because it can ADVANCE the fence we then wait on below.
+  if (!EnsureAllResidentAndWait()) {
+    pr_err("EnsureAllResidentAndWait failed before SubmitToHwQueue\n");
+    return false;
+  }
+
   void *priv_data;
   int priv_size;
 
@@ -945,6 +954,15 @@ bool WDDMDevice::SetCuMask(uint32_t doorbell, uint32_t cu_mask_count,
 bool WDDMDevice::SubmitToAqlQueue(WDDMQueue* queue, uint64_t command_addr, uint64_t command_size,
                                   uint64_t fence_value) {
 #if defined(WIN32)
+  // PAL-equivalent residency: re-make the entire tracked working set
+  // resident in one batched call and wait on the paging fence before
+  // submitting.  Runs before the GPU-side paging fence wait below so
+  // that wait covers any fence value advanced here.
+  if (!EnsureAllResidentAndWait()) {
+    pr_err("EnsureAllResidentAndWait failed before SubmitToAqlQueue\n");
+    return false;
+  }
+
   int priv_size = Wkmi::GetAqlSubmitPrivDataSize();
   void* priv_data = alloca(priv_size);
   memset(priv_data, 0, priv_size);
@@ -1146,6 +1164,94 @@ bool WDDMDevice::SetTrapHandler(uint64_t tba, uint64_t tma) const {
   return Escape(priv_data, priv_size, true);
 }
 
+// ================================================================================
+// PAL-equivalent WDDM residency-set management.
+//
+// WDDM can trim (evict) any allocation between the time it was originally
+// made resident and the time the GPU actually touches it.  Without explicit
+// residency management this surfaces as STATUS_GRAPHICS_GPU_EXCEPTION_ON_DEVICE
+// (0xC01E0200) at the next SubmitToAqlQueue / SubmitToHwQueue call.  PAL
+// avoids this by tracking every resident allocation and re-issuing a single
+// batched MakeResident over the whole set before every submission.
+//
+// We deliberately do NOT register a trim-notification callback here.  PAL
+// itself doesn't register one on DX builds (and the KMT-build callback is
+// empty), so the per-submission batched MakeResident is the load-bearing
+// piece on its own.
+// ================================================================================
+
+void WDDMDevice::RegisterResidentAllocation(GpuMemory* mem) {
+  if (!mem) return;
+  std::lock_guard<std::mutex> g(residency_lock_);
+  tracked_allocations_.insert(mem);
+}
+
+void WDDMDevice::UnregisterAllocation(GpuMemory* mem) {
+  if (!mem) return;
+  std::lock_guard<std::mutex> g(residency_lock_);
+  tracked_allocations_.erase(mem);
+}
+
+bool WDDMDevice::EnsureAllResidentAndWait() {
+  // Flatten every chunk handle from every tracked GpuMemory* into one
+  // contiguous array and issue a single batched MakeResident.  Per-allocation
+  // MakeResident calls are wrong: WDDM can evict an earlier allocation to
+  // satisfy a later one in the loop, leaving the working set partially
+  // resident at submission time.
+  std::vector<WinAllocationHandle> handles;
+  std::vector<UINT>                priorities;
+  {
+    std::lock_guard<std::mutex> g(residency_lock_);
+    handles.reserve(tracked_allocations_.size() * 2);
+    priorities.reserve(tracked_allocations_.size() * 2);
+    for (GpuMemory* mem : tracked_allocations_) {
+      if (!mem || !mem->IsPhysicalCreated()) continue;
+      const size_t nchunks = mem->NumChunks();
+      for (size_t i = 0; i < nchunks; ++i) {
+        auto h = mem->GetAllocationHandle(i);
+        if (h) {
+          handles.push_back(h);
+          // Priority = 1 (normal).  0 makes the allocation a prime
+          // eviction candidate; PAL uses 1 for the same reason.
+          priorities.push_back(1);
+        }
+      }
+    }
+  }
+
+  if (handles.empty()) {
+    return WaitOnPagingFenceFromCpu();
+  }
+
+  D3DDDI_MAKERESIDENT args = {};
+  args.hPagingQueue   = page_queue_;
+  args.NumAllocations = static_cast<UINT>(handles.size());
+  args.AllocationList = handles.data();
+  args.PriorityList   = priorities.data();
+  // CantTrimFurther = 1: WDDM must keep this batch resident as a unit
+  // or fail the call.  Matches PAL.
+  args.Flags.CantTrimFurther = 1;
+
+  ErrorCode code = d3dthunk::MakeResident(&args);
+
+  // Always update + wait on PagingFenceValue regardless of return code.
+  // With CantTrimFurther=1, Success can be returned while paging is still
+  // in flight, so the fence wait is required for correctness.
+  if (args.PagingFenceValue > 0) {
+    UpdatePageFence(args.PagingFenceValue);
+  }
+
+  if (code != ErrorCode::Success && code != ErrorCode::NotReady) {
+    pr_err("EnsureAllResidentAndWait: batched MakeResident failed code=%d, "
+           "NumBytesToTrim=%llu\n",
+           static_cast<int>(code),
+           static_cast<unsigned long long>(args.NumBytesToTrim));
+    (void)WaitOnPagingFenceFromCpu();
+    return false;
+  }
+
+  return WaitOnPagingFenceFromCpu();
+}
 
 } // namespace thunk
 } // namespace wsl

@@ -56,6 +56,8 @@
 #include <memory>
 #include <vector>
 #include <bitset>
+#include <mutex>
+#include <unordered_set>
 
 #include "impl/wddm/types.h"
 #include "wkmi.h"
@@ -216,6 +218,16 @@ public:
   // paging (matches PAL's WaitOnPagingFenceFromGpu).
   bool SubmitWaitForPagingFenceToHwQueue(D3DKMT_HANDLE hw_queue);
 
+  // PAL-equivalent residency management: track every kLocal / kUserQueue
+  // allocation and re-make the whole set resident in one batched call
+  // before every submission.
+  void RegisterResidentAllocation(class GpuMemory* mem);
+  void UnregisterAllocation(class GpuMemory* mem);
+  // Called before every D3DKMTSubmitCommandToHwQueue. Issues one batched
+  // D3DDDIMakeResident with CantTrimFurther=1 over the entire tracked set,
+  // then waits on the paging fence. Returns false on fatal residency error.
+  bool EnsureAllResidentAndWait();
+
   uint32_t LdsBlocks(const hsa_kernel_dispatch_packet_t *pkt);
   uint32_t GetCmdbufSize(void) const { return cmdbuf_size_; }
   uint32_t GetAqlFrameSize(void) const { return cmdbuf_aql_frame_size_; }
@@ -280,6 +292,13 @@ private:
   D3DKMT_HANDLE page_syncobj_;
   uint64_t *page_fence_addr_;
   std::atomic<uint64_t> page_fence_value_;
+
+  // PAL-equivalent residency tracking: every kLocal / kUserQueue allocation
+  // is registered here so EnsureAllResidentAndWait can issue a single
+  // batched D3DDDIMakeResident over the entire working set before each
+  // submission.
+  std::mutex residency_lock_;
+  std::unordered_set<class GpuMemory*> tracked_allocations_;
 
   uint32_t cmdbuf_size_;
   uint32_t cmdbuf_aql_frame_size_;
