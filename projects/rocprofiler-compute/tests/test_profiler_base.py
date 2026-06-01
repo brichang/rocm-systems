@@ -8,13 +8,25 @@ from unittest.mock import patch
 import common
 import pytest
 
-from rocprof_compute_profile.profiler_base import RocProfCompute_Base
+from rocprof_compute_profile.profiler_base import (
+    _FRAMEWORK_ENV_VAR,
+    RocProfCompute_Base,
+)
 from rocprof_compute_profile.profiler_rocprofiler_sdk import rocprofiler_sdk_profiler
 from utils.utils_exceptions import (
     ExecutableNotFoundError,
     NoScriptInCommandError,
     PythonScriptNotFoundError,
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_framework_env(monkeypatch):
+    """sanitize() publishes ROCPROFCOMPUTE_ROCTX_FRAMEWORKS via os.environ.
+    Strip it before and let monkeypatch restore the prior value afterward,
+    so torch_trace cases never leak the var to no-torch_trace cases.
+    """
+    monkeypatch.delenv(_FRAMEWORK_ENV_VAR, raising=False)
 
 
 def _make_sanitize_args(remaining, torch_trace=False):

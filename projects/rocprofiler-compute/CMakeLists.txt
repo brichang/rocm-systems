@@ -846,8 +846,14 @@ install(
     PATTERN "rooflines*" EXCLUDE
     PATTERN "__pycache__" EXCLUDE
 )
-# Install the roctx_recordfn sources so the runtime loader can rebuild
-# the extension against the user's PyTorch environment on first use.
+# Always install the roctx_recordfn sources next to the loader's
+# search path so the runtime cmake-tier
+# (utils/inject_roctx/_backends/_torch_cpp_loader.py:_try_cmake_build)
+# can rebuild against the user's torch env, even
+# when no prebuilt .so was baked at package time. Independent of
+# SKIP_NATIVE_TOOL_BUILD: the SKIP block below installs src/lib/
+# wholesale but only fires in source-shipping mode; this rule keeps
+# the cmake-tier alive in the default (compiled-tool) mode too.
 install(
     DIRECTORY src/lib/roctx_recordfn
     DESTINATION ${CMAKE_INSTALL_LIBEXECDIR}/${PROJECT_NAME}/lib

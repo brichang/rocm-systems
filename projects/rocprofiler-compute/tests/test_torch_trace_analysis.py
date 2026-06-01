@@ -15,8 +15,8 @@ from utils.rocpd_data import (
 )
 from utils.utils_analysis import (
     build_call_trees_with_kernel_ids,
-    process_torch_trace_output,
-    write_torch_trace_consolidated_csv,
+    process_api_trace_output,
+    write_api_trace_consolidated_csv,
 )
 
 GUID = "abc-1234-def"
@@ -213,7 +213,7 @@ def test_marker_csv_has_correlation_id_from_stack_id():
     common.clean_output_dir(True, workload_dir)
 
 
-# ---- process_torch_trace_output parity for rocpd vs csv layouts ----
+# ---- process_api_trace_output parity for rocpd vs csv layouts ----
 
 
 MARKER_COLUMNS_ROCPD = [
@@ -319,8 +319,8 @@ def write_rocpd_layout(workload_dir, fbase="run0"):
     marker_df = build_marker_df(include_guid=True)
     counter_df = build_counter_df(include_guid=True)
 
-    marker_path = Path(workload_dir) / f"torch_trace_{fbase}_marker_api_trace.csv"
-    counter_path = Path(workload_dir) / f"torch_trace_{fbase}_counter_collection.csv"
+    marker_path = Path(workload_dir) / f"api_trace_{fbase}_marker_api_trace.csv"
+    counter_path = Path(workload_dir) / f"api_trace_{fbase}_counter_collection.csv"
 
     marker_df.to_csv(marker_path, index=False)
     counter_df.to_csv(counter_path, index=False)
@@ -334,18 +334,18 @@ def write_csv_layout(workload_dir, fbase="run0", pid="12345"):
     marker_df = build_marker_df(include_guid=False)
     counter_df = build_counter_df(include_guid=False)
 
-    marker_path = subdir / f"torch_trace_{pid}_marker_api_trace.csv"
-    counter_path = subdir / f"torch_trace_{pid}_counter_collection.csv"
+    marker_path = subdir / f"api_trace_{pid}_marker_api_trace.csv"
+    counter_path = subdir / f"api_trace_{pid}_counter_collection.csv"
 
     marker_df.to_csv(marker_path, index=False)
     counter_df.to_csv(counter_path, index=False)
 
 
-def read_torch_trace_csvs(torch_trace_dir):
+def read_api_trace_csvs(api_trace_dir):
     """Return a dict mapping filename -> sorted DataFrame for comparison."""
     result = {}
 
-    for csv_file in sorted(Path(torch_trace_dir).glob("*.csv")):
+    for csv_file in sorted(Path(api_trace_dir).glob("*.csv")):
         df = pd.read_csv(csv_file)
         df = df.sort_values(by=list(df.columns)).reset_index(drop=True)
         result[csv_file.name] = df
@@ -360,8 +360,8 @@ def build_kernel_top_df():
     })
 
 
-def test_torch_trace_output_same_for_rocpd_and_csv():
-    """Test that the torch trace output is the same for rocpd and csv files."""
+def test_api_trace_output_same_for_rocpd_and_csv():
+    """Test that the API trace output is the same for rocpd and csv files."""
     rocpd_dir = common.get_output_dir(suffix="_rocpd")
     csv_dir = common.get_output_dir(suffix="_csv")
 
@@ -372,15 +372,15 @@ def test_torch_trace_output_same_for_rocpd_and_csv():
     write_csv_layout(csv_dir)
 
     kernel_top_df = build_kernel_top_df()
-    rocpd_output = process_torch_trace_output(rocpd_dir)
-    csv_output = process_torch_trace_output(csv_dir)
+    rocpd_output = process_api_trace_output(rocpd_dir)
+    csv_output = process_api_trace_output(csv_dir)
     assert rocpd_output is not None
     assert csv_output is not None
     rocpd_df, rocpd_trace_path = rocpd_output
     csv_df, csv_trace_path = csv_output
 
-    write_torch_trace_consolidated_csv(rocpd_df, rocpd_trace_path)
-    write_torch_trace_consolidated_csv(csv_df, csv_trace_path)
+    write_api_trace_consolidated_csv(rocpd_df, rocpd_trace_path)
+    write_api_trace_consolidated_csv(csv_df, csv_trace_path)
     rocpd_trees = build_call_trees_with_kernel_ids(rocpd_df, kernel_top_df)
     csv_trees = build_call_trees_with_kernel_ids(csv_df, kernel_top_df)
 
@@ -402,11 +402,11 @@ def test_torch_trace_output_same_for_rocpd_and_csv():
         assert "kernel_mm" in mm_node.kernels
         assert mm_node.kernels["kernel_mm"].launches == 1
 
-    rocpd_results = read_torch_trace_csvs(Path(rocpd_dir) / "torch_trace")
-    csv_results = read_torch_trace_csvs(Path(csv_dir) / "torch_trace")
+    rocpd_results = read_api_trace_csvs(Path(rocpd_dir) / "api_trace")
+    csv_results = read_api_trace_csvs(Path(csv_dir) / "api_trace")
 
     assert rocpd_results.keys() == csv_results.keys(), (
-        f"Torch trace CSV files differ: rocpd={sorted(rocpd_results.keys())} "
+        f"API trace CSV files differ: rocpd={sorted(rocpd_results.keys())} "
         f"csv={sorted(csv_results.keys())}"
     )
 

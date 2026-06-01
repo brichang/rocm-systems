@@ -65,7 +65,7 @@ def run_prof(
     workload_dir: str,
     loglevel: int,
     format_rocprof_output: str,
-    torch_trace_enabled: bool = False,
+    api_trace_enabled: bool = False,
     retain_rocpd_output: bool = False,
 ) -> None:
     multiple_files = isinstance(fnames, list)
@@ -290,9 +290,9 @@ def run_prof(
                 "deprecated and will be replaced with automatic .db file "
                 "retention in a future release."
             )
-        if torch_trace_enabled:
+        if api_trace_enabled:
             # move counter collection and marker trace to workload dir
-            save_torch_trace_inputs(workload_dir, fbase, format_rocprof_output)
+            save_api_trace_inputs(workload_dir, fbase, format_rocprof_output)
         if retain_rocpd_output:
             console_warning(
                 "--retain-rocpd-output is deprecated and will be removed in "
@@ -332,9 +332,9 @@ def run_prof(
                 # rocprof-compute should make updates accordingly
                 process_kokkos_trace_output(workload_dir, fbase)
         # Add torch operator trace processing
-        if torch_trace_enabled:
+        if api_trace_enabled:
             # move counter collection and marker trace to workload dir
-            save_torch_trace_inputs(workload_dir, fbase, format_rocprof_output)
+            save_api_trace_inputs(workload_dir, fbase, format_rocprof_output)
         # Combine results into single CSV file
         if results_files:
             combined_results = csv_ops.concat_csv_files(results_files)
@@ -849,30 +849,30 @@ def process_rocprofv3_output(workload_dir: str, using_native_tool: bool) -> list
 
 
 @demarcate
-def save_torch_trace_inputs(
+def save_api_trace_inputs(
     workload_dir: str,
     fbase: str,
     output_format: str = "rocpd",
 ) -> None:
     """
     Move counter_collection and marker_api_trace data to workload_dir,
-    for creation of PyTorch operator trace in Analyze mode.
+    for creation of API trace in Analyze mode.
     """
     src_dir = Path(workload_dir) / "out" / "pmc_1"
     if output_format == "rocpd":
         # Only one pair expected
         src_counter = src_dir / f"{fbase}_counter_collection.csv"
         src_marker = src_dir / f"{fbase}_marker_api_trace.csv"
-        dst_counter = Path(workload_dir) / f"torch_trace_{fbase}_counter_collection.csv"
-        dst_marker = Path(workload_dir) / f"torch_trace_{fbase}_marker_api_trace.csv"
+        dst_counter = Path(workload_dir) / f"api_trace_{fbase}_counter_collection.csv"
+        dst_marker = Path(workload_dir) / f"api_trace_{fbase}_marker_api_trace.csv"
         # These files are expected to exist
         # Letting shutil.copyfile raise error if files not found
         shutil.copyfile(src_counter, dst_counter)
         shutil.copyfile(src_marker, dst_marker)
         console_log(
-            "torch trace",
+            "api trace",
             "Moved counter collection and marker trace files "
-            "to workload dir for PyTorch trace creation.",
+            "to workload dir for API trace creation.",
         )
         console_log("Counter Collection: ", str(dst_counter))
         console_log("Marker API Trace: ", str(dst_marker))
@@ -883,24 +883,26 @@ def save_torch_trace_inputs(
         (Path(workload_dir) / f"{fbase}").mkdir(parents=True, exist_ok=True)
         # Expecting the files to be present
         # Letting shutil.copyfile raise error if files not found
-        # Path: workload_dir/fbase/torch_trace_<src_basename> (discovered by
-        # process_torch_trace_output via glob **/torch_trace*_marker_api_trace.csv)
+        # Path: workload_dir/fbase/api_trace_<src_basename> (discovered by
+        # process_api_trace_output via glob **/api_trace*_marker_api_trace.csv)
         for src_counter in counter_files:
-            dst_counter = (
-                Path(workload_dir) / f"{fbase}" / ("torch_trace_" + src_counter.name)
+            dst_counter = str(
+                Path(workload_dir)
+                / f"{fbase}"
+                / ("api_trace_" + Path(src_counter).name)
             )
             shutil.copyfile(src_counter, dst_counter)
-            console_log("torch trace", f"Copied Counter Collection: {dst_counter}")
+            console_log("api trace", f"Copied Counter Collection: {dst_counter}")
         for src_marker in marker_files:
-            dst_marker = (
-                Path(workload_dir) / f"{fbase}" / ("torch_trace_" + src_marker.name)
+            dst_marker = str(
+                Path(workload_dir) / f"{fbase}" / ("api_trace_" + Path(src_marker).name)
             )
             shutil.copyfile(src_marker, dst_marker)
-            console_log("torch trace", f"Copied Marker API Trace: {dst_marker}")
+            console_log("api trace", f"Copied Marker API Trace: {dst_marker}")
     else:
         console_warning(
-            "torch trace",
-            f"Unknown output_format: {output_format} in save_torch_trace_inputs",
+            "api trace",
+            f"Unknown output_format: {output_format} in save_api_trace_inputs",
         )
 
 
