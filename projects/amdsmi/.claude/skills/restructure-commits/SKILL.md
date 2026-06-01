@@ -16,6 +16,25 @@ rocm-systems / amd-smi conventions.
 - Preparing a PR for merge with clean history
 - Reviewer requests commit cleanup
 
+## Scope — Current Worktree/Branch by Default
+
+By default this skill operates on **the branch checked out in the current working
+directory** and nothing else. Confirm the target up front:
+`git rev-parse --show-toplevel` and `git branch --show-current`.
+
+Wandering to other worktrees, sibling checkouts, or other open PRs is allowed
+**only with explicit user approval for that specific scope**:
+
+- Default to the current branch. Do not `cd` into another worktree or restructure
+  another branch/PR unless the user has clearly asked you to.
+- If restructuring would help across several branches/PRs, **propose it and wait
+  for approval** — name each branch/worktree you'd touch — before leaving the
+  current one. Silence is not approval.
+- When approved to span multiple branches, treat it as **one pass per branch**,
+  run from that branch's own worktree, restructuring only that branch's commits.
+- If the current branch isn't the one the user meant, STOP and ask rather than
+  switching to it yourself.
+
 ---
 
 ## Workflow
@@ -399,6 +418,7 @@ git worktree prune
 
 ## Red Flags — STOP
 
+- `cd`-ing into another worktree/checkout, or restructuring a branch other than the current one, without explicit user approval for that scope
 - Tests failing when presenting options (must be green first)
 - Pushing without explicit user approval (user rule)
 - Force-push without explicit user approval (user rule)

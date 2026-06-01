@@ -1,6 +1,6 @@
 ---
 name: executing-plans
-description: "Use when a written implementation plan exists at docs/dev/plans/ and you need to execute it task-by-task in the current session with verification at each step."
+description: "Use when a written implementation plan exists at .claude/context/plans/ and you need to execute it task-by-task in the current session with verification at each step."
 ---
 
 # Executing Plans — amd-smi
