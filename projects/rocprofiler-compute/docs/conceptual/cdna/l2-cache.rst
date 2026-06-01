@@ -194,6 +194,15 @@ expected to be counted as a 64B Read Request, and *if* they are requests
 to uncached memory (denoted by the dashed line), they will also be
 counted as *two* uncached read requests (that is, the request is split).
 
+.. note::
+
+   On CDNA4 (MI350 series) accelerators, an L3 cache sits between the L2 cache
+   and the Infinity Fabric / memory interface. As a result, the L2-Fabric
+   **bandwidth** metrics in this section may or may not represent traffic that is
+   ultimately serviced by the accelerator's local HBM, a remote accelerator over
+   Infinity Fabric (xGMI), or a PCIe-connected device — some of this traffic may
+   instead be serviced by the L3 cache. This applies to CDNA4 only; earlier CDNA
+   architectures have no L3 cache.
 
 .. _l2-fabric-metrics:
 
