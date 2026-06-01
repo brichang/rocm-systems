@@ -248,9 +248,19 @@ get_async_signal_handler()
     using task_group_t           = internal_threading::task_group_t;
     using create_task_group_fn_t = task_group_t* (*) (void*, size_t);
 
+    // default to 4 threads if neither GPU_MAX_HW_QUEUES or ROCPROFILER_ASYNC_SIGNAL_HANDLER_THREADS
+    // is set, since the async signal handler is primarily intended for handling queue completion
+    // signals and a typical GPU may have on the order of 4 hardware queues. Note: GPU_MAX_HW_QUEUES
+    // is a ROCr/HSA environment variable. If GPU_MAX_HW_QUEUES is set but
+    // ROCPROFILER_ASYNC_SIGNAL_HANDLER_THREADS is not set, we will use the value of
+    // GPU_MAX_HW_QUEUES to determine the number of threads for the async signal handler. If
+    // ROCPROFILER_ASYNC_SIGNAL_HANDLER_THREADS is set, it will take precedence over
+    // GPU_MAX_HW_QUEUES.
     static auto*& _v =
         common::static_object<internal_threading::task_group_t>::construct_via_function(
-            static_cast<create_task_group_fn_t>(&internal_threading::create_task_group), 4);
+            static_cast<create_task_group_fn_t>(&internal_threading::create_task_group),
+            common::get_env("ROCPROFILER_ASYNC_SIGNAL_HANDLER_THREADS",
+                            common::get_env("GPU_MAX_HW_QUEUES", 4)));
 
     return _v;
 }
@@ -291,7 +301,7 @@ async_signal_handler(hsa_signal_t                            completion_signal,
 {
     constexpr auto timeout_hint =
         std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::microseconds{10});
-    constexpr auto max_iterations = (1UL << 20);  // cap at ~1M iterations to prevent infinit loop
+    constexpr auto max_iterations = (1UL << 20);  // cap at ~1M iterations to prevent infinite loop
 
     auto signal_value = starting_value;
     auto niterations  = uint64_t{0};
