@@ -69,6 +69,8 @@ jobs:
           echo "changed_dockerfile=$(./util/files-changed.sh "origin/${GITHUB_BASE_REF}" HEAD 'projects/hipfile/util/docker/DOCKERFILE.*')" >> "${GITHUB_OUTPUT}"
       - name: Compute matrix configurations
         id: matrices
+        env:
+          CHANGED_DOCKERFILE: ${{ steps.ci-flags.outputs.changed_dockerfile }}
         # ci_matrix is the full strategy.matrix object handed to the test
         # job (Linux). GHA expands the cross-product and applies the
         # include/exclude keys itself.
@@ -81,7 +83,8 @@ jobs:
         # images, and an exclude that removes all test legs for a given
         # (platform, version) correctly removes that image from the catalog.
         #
-        # The full_CI_images_matrix is emitted in include-only form so GHA spawns
+        # build_CI_images_matrix is the subset we actually (re)build this run
+        # (see below). Both are emitted in include-only form so GHA spawns
         # exactly one image-build job per row.
         run: |
           ci_matrix=$(
@@ -153,6 +156,38 @@ jobs:
           echo "hipFile Full CI Images Matrix: "
           echo "${full_CI_images_matrix}" | jq .
           echo "full_CI_images_matrix=${full_CI_images_matrix}" >> ${GITHUB_OUTPUT}
+
+          # build_CI_images_matrix drives which images are actually (re)built this
+          # run. When a Dockerfile changed we rebuild everything; otherwise only
+          # the nightly rows, whose target moves daily and so cannot be served
+          # from a pre-existing latest tag. (Other versions reuse their
+          # latest-rocm<ver> image.)
+          if [ "${CHANGED_DOCKERFILE}" = "1" ]; then
+            build_CI_images_matrix="${full_CI_images_matrix}"
+          else
+            build_CI_images_matrix=$(
+              printf '%s' "${full_CI_images_matrix}" \
+                | jq -c '{include: [.include[] | select(.rocm_versions == "nightly")]}'
+            )
+          fi
+          echo "hipFile Build CI Images Matrix: "
+          echo "${build_CI_images_matrix}" | jq .
+          echo "build_CI_images_matrix=${build_CI_images_matrix}" >> ${GITHUB_OUTPUT}
+      - name: Resolve ROCm nightly metadata
+        id: nightly
+        working-directory: rocm-systems/projects/hipfile
+        env:
+          FULL_CI_IMAGES_MATRIX: ${{ steps.matrices.outputs.full_CI_images_matrix }}
+        # Only resolves when a nightly row is present; otherwise emit empty values
+        # so the downstream image-name step stays wired up unconditionally.
+        run: |
+          if printf '%s' "${FULL_CI_IMAGES_MATRIX}" \
+              | jq -e '.include[]? | select(.rocm_versions == "nightly")' >/dev/null; then
+            ./util/resolve-rocm-nightly.sh | tee -a "${GITHUB_OUTPUT}"
+          else
+            echo "nightly_build=" >> "${GITHUB_OUTPUT}"
+            echo "nightly_rocm_version=" >> "${GITHUB_OUTPUT}"
+          fi
       - name: Compute CI image names
         id: ci-images
         env:
