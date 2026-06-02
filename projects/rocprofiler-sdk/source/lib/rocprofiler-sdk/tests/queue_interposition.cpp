@@ -102,8 +102,11 @@ TEST(queue_interposition, doorbell_map_insert_and_lookup)
 
     get_queue_registry().wlock([&](auto& registry) { registry[queue_ptr] = state; });
 
-    // Create a doorbell signal and register it
+    // Create a doorbell signal and register it. kind must be a doorbell kind: lookup_queue_state_
+    // by_doorbell only trusts queue_ptr for doorbell-kind signals (queue_ptr aliases reserved2 in
+    // the union for other kinds).
     auto amd_doorbell = amd_signal_t{};
+    amd_doorbell.kind = AMD_SIGNAL_KIND_DOORBELL;
     amd_doorbell.queue_ptr =
         const_cast<amd_queue_v2_t*>(reinterpret_cast<const amd_queue_v2_t*>(queue_ptr));
     auto doorbell = hsa_signal_t{.handle = reinterpret_cast<uint64_t>(&amd_doorbell)};
@@ -299,6 +302,7 @@ TEST(queue_interposition, create_and_destroy_queue_state)
     EXPECT_EQ(state->doorbell_signal.handle, 9999u);
 
     auto amd_doorbell      = amd_signal_t{};
+    amd_doorbell.kind      = AMD_SIGNAL_KIND_DOORBELL;
     amd_doorbell.queue_ptr = &amd_fake_queue;
     auto doorbell          = hsa_signal_t{.handle = reinterpret_cast<uint64_t>(&amd_doorbell)};
 

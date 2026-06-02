@@ -32,6 +32,7 @@
 #include "lib/rocprofiler-sdk/hsa/queue_interposition.hpp"
 #include "lib/common/container/pool.hpp"
 #include "lib/common/container/pool_object.hpp"
+#include "lib/common/environment.hpp"
 #include "lib/common/logging.hpp"
 #include "lib/common/static_object.hpp"
 #include "lib/common/utility.hpp"
@@ -132,7 +133,14 @@ lookup_queue_state_by_doorbell(hsa_signal_t signal, bool create_if_missing)
     // NOLINTNEXTLINE(performance-no-int-to-ptr)
     const auto* _amd_signal = reinterpret_cast<amd_signal_t*>(signal.handle);
 
-    if(_amd_signal && _amd_signal->queue_ptr)
+    if(!_amd_signal) return queue_state_ptr_t{};
+
+    // Only doorbell-kind signals carry a valid queue_ptr (it aliases reserved2 otherwise).
+    if(_amd_signal->kind != AMD_SIGNAL_KIND_DOORBELL &&
+       _amd_signal->kind != AMD_SIGNAL_KIND_LEGACY_DOORBELL)
+        return queue_state_ptr_t{};
+
+    if(_amd_signal->queue_ptr)
         return lookup_queue_state(reinterpret_cast<const hsa_queue_t*>(_amd_signal->queue_ptr),
                                   create_if_missing);
 
@@ -167,22 +175,50 @@ load_write_index_impl(const QueueState* state, std::memory_order order)
 
 namespace
 {
-// TLS handoff from process_doorbell_impl() to ring_buffer_writer(). Set on entry
-// and cleared on exit of process_doorbell_impl(); not valid outside that scope.
-thread_local QueueState*          tls_state                     = nullptr;
-thread_local uint64_t             tls_submit_pos                = 0;
-thread_local uint32_t             tls_pkt_size                  = 64;
-thread_local const doorbell_fn_t* tls_ring_doorbell             = nullptr;
-thread_local uint64_t             tls_last_published_submit_pos = 0;
+// CPU pause hint for short spin-waits (cheaper than yield/sleep, no added latency).
+inline void
+cpu_relax()
+{
+#if defined(__x86_64__) || defined(__i386__)
+    __builtin_ia32_pause();
+#elif defined(__aarch64__)
+    asm volatile("yield" ::: "memory");
+#else
+    std::this_thread::yield();
+#endif
+}
+
+// Per-thread handoff from process_doorbell_impl() to ring_buffer_writer().
+struct doorbell_tls_t
+{
+    QueueState*          state                     = nullptr;
+    uint64_t             submit_pos                = 0;
+    uint32_t             pkt_size                  = 64;
+    const doorbell_fn_t* ring_doorbell             = nullptr;
+    uint64_t             last_published_submit_pos = 0;
+};
+
+doorbell_tls_t&
+get_doorbell_tls()
+{
+    static thread_local auto _v = doorbell_tls_t{};
+    return _v;
+}
 
 inline void
 publish_submitted_packets(QueueState* state, uint64_t submit_pos)
 {
-    if(!tls_ring_doorbell || submit_pos <= tls_last_published_submit_pos || submit_pos == 0) return;
+    auto& tls = get_doorbell_tls();
+    if(!tls.ring_doorbell || submit_pos <= tls.last_published_submit_pos || submit_pos == 0) return;
+
+    // submit_pos must never regress below what we already published (corruption); fatal in CI.
+    ROCP_CI_LOG_IF(WARNING, submit_pos < tls.last_published_submit_pos)
+        << "publish_submitted_packets: submit_pos (" << submit_pos
+        << ") regressed below last_published_submit_pos (" << tls.last_published_submit_pos << ")";
 
     __atomic_store_n(state->real_wdid, submit_pos, __ATOMIC_RELEASE);
-    (*tls_ring_doorbell)(state->doorbell_signal, static_cast<hsa_signal_value_t>(submit_pos - 1));
-    tls_last_published_submit_pos = submit_pos;
+    (*tls.ring_doorbell)(state->doorbell_signal, static_cast<hsa_signal_value_t>(submit_pos - 1));
+    tls.last_published_submit_pos = submit_pos;
 }
 
 inline void
@@ -201,20 +237,21 @@ wait_for_free_slot(QueueState* state, uint64_t submit_pos)
         // packets beyond the last visible write index, publish progress so the
         // consumer can observe and drain them.
         publish_submitted_packets(state, submit_pos);
-        std::this_thread::yield();
+        cpu_relax();
     }
 }
 
 void
 ring_buffer_writer(const void* pkts, uint64_t pkt_count)
 {
-    auto*       state    = tls_state;
-    auto        pkt_size = tls_pkt_size;
+    auto&       tls      = get_doorbell_tls();
+    auto*       state    = tls.state;
+    auto        pkt_size = tls.pkt_size;
     const auto* src      = static_cast<const char*>(pkts);
     for(uint64_t i = 0; i < pkt_count; i++)
     {
-        wait_for_free_slot(state, tls_submit_pos);
-        auto        slot = tls_submit_pos & state->ring_mask;
+        wait_for_free_slot(state, tls.submit_pos);
+        auto        slot = tls.submit_pos & state->ring_mask;
         auto*       dst  = static_cast<char*>(state->ring_buf) + (slot * pkt_size);
         const auto* s    = src + i * pkt_size;
         if(dst != s)
@@ -232,7 +269,7 @@ ring_buffer_writer(const void* pkts, uint64_t pkt_count)
                 ::memcpy(dst, s, pkt_size);
             }
         }
-        tls_submit_pos++;
+        tls.submit_pos++;
     }
 }
 
@@ -301,11 +338,12 @@ async_signal_handler(hsa_signal_t                            completion_signal,
 {
     constexpr auto timeout_hint =
         std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::microseconds{10});
-    constexpr auto max_iterations = (1UL << 20);  // cap at ~1M iterations to prevent infinite loop
 
     auto signal_value = starting_value;
     auto niterations  = uint64_t{0};
-    while(niterations < max_iterations)
+
+    // Stop only on completion or finalization; never run cleanup while the kernel is live.
+    while(true)
     {
         signal_value = get_core_table()->hsa_signal_wait_relaxed_fn(completion_signal,
                                                                     HSA_SIGNAL_CONDITION_LT,
@@ -313,26 +351,25 @@ async_signal_handler(hsa_signal_t                            completion_signal,
                                                                     timeout_hint.count(),
                                                                     HSA_WAIT_STATE_ACTIVE);
 
-        if(signal_value < starting_value || registration::get_fini_status() != 0) break;
+        if(signal_value < starting_value) break;         // kernel completed
+        if(registration::get_fini_status() != 0) break;  // tearing down: run cleanup path
         ++niterations;
+
+        // Surface long-running waits for diagnostics without giving up the wait.
+        constexpr auto warn_interval = (1UL << 20);
+        if(niterations % warn_interval == 0)
+            ROCP_WARNING << fmt::format(
+                "Async signal handler still waiting on signal {{.handle={}}} after {} iterations "
+                "(value={}, starting_value={})",
+                completion_signal.handle,
+                niterations,
+                signal_value,
+                starting_value);
     }
 
-    if(niterations >= max_iterations && signal_value >= starting_value &&
-       registration::get_fini_status() == 0)
-    {
-        ROCP_WARNING << fmt::format(
-            "Async signal handler timed out waiting on signal {{.handle={}}} after {} iterations "
-            "(value={}, starting_value={}); kernel-dispatch completion timing may be incomplete",
-            completion_signal.handle,
-            niterations,
-            signal_value,
-            starting_value);
-    }
-
-    ROCP_INFO << fmt::format("Async signal handler invoked for signal {{.handle={} / {:3}}} with "
+    ROCP_INFO << fmt::format("Async signal handler invoked for signal {{.handle={}}} with "
                              "value {} (original value={}, iterations={})",
                              completion_signal.handle,
-                             completion_signal.handle % 1000,
                              signal_value,
                              starting_value,
                              niterations);
@@ -536,13 +573,10 @@ write_interceptor(Queue*                                queue,
                 return nullptr;
             };
 
-            // create our own signal that we can get a callback on. if there is an original
-            // completion signal we will create a barrier packet, assign the original completion
-            // signal that that barrier packet, and add it right after the kernel packet
+            // No barrier packet: borrow a pooled signal if needed, then bump value by 1.
             if(!existing_completion_signal)
                 _packet_data.pooled_signal = create_signal(&completion_signal);
 
-            // increment the signal value
             get_core_table()->hsa_signal_add_scacq_screl_fn(completion_signal, 1);
 
             // set the completion signal to the kernel packet
@@ -631,9 +665,8 @@ write_interceptor(Queue*                                queue,
                 get_core_table()->hsa_signal_load_scacquire_fn(last_completion_signal);
 
             ROCP_INFO << fmt::format(
-                "  Enqueued batch with completion signal {{.handle={} / {:3}}} with value {}",
+                "  Enqueued batch with completion signal {{.handle={}}} with value {}",
                 last_completion_signal.handle,
-                last_completion_signal.handle % 1000,
                 current_signal_value);
 
             auto _shared_info_session =
@@ -667,6 +700,7 @@ process_doorbell_impl(const queue_state_ptr_t& state,
 
     auto* state_ptr = state.get();
 
+    // gate_lock serializes doorbell processing; producers never take it, so no deadlock.
     std::unique_lock<std::mutex> lock{state_ptr->gate_lock};
 
     const uint64_t scan_pos = state_ptr->next_scan_pos;
@@ -717,7 +751,12 @@ process_doorbell_impl(const queue_state_ptr_t& state,
     // that owns the slot cannot write to it until we release gate_lock (it needs no lock to
     // write the body) so this spin terminates once the writer completes its memcpy + header
     // store, with no risk of deadlock.
-    auto source_snapshot = std::vector<char>(pkt_count * state_ptr->pkt_size);
+    // Reused per-thread buffer (grows only) to avoid a heap allocation on every doorbell.
+    static thread_local auto snapshot_storage = std::vector<char>{};
+    const uint64_t           snapshot_bytes   = pkt_count * state_ptr->pkt_size;
+    if(snapshot_storage.size() < snapshot_bytes) snapshot_storage.resize(snapshot_bytes);
+    char* const source_snapshot = snapshot_storage.data();
+
     for(uint64_t i = 0; i < pkt_count; ++i)
     {
         const auto  ring_slot = (scan_pos + i) & state_ptr->ring_mask;
@@ -729,22 +768,22 @@ process_doorbell_impl(const queue_state_ptr_t& state,
         while((__atomic_load_n(hdr_ptr, __ATOMIC_ACQUIRE) & 0xFFu) ==
               static_cast<unsigned>(HSA_PACKET_TYPE_INVALID))
         {
-            std::this_thread::yield();
+            cpu_relax();
         }
 
-        ::memcpy(
-            source_snapshot.data() + (i * state_ptr->pkt_size), slot_base, state_ptr->pkt_size);
+        ::memcpy(source_snapshot + (i * state_ptr->pkt_size), slot_base, state_ptr->pkt_size);
 
         // Reset the header to INVALID so the next ring-buffer generation can be detected.
         __atomic_store_n(hdr_ptr, static_cast<uint16_t>(HSA_PACKET_TYPE_INVALID), __ATOMIC_RELEASE);
     }
 
-    tls_state                     = state_ptr;
-    tls_submit_pos                = state_ptr->next_submit_pos;
-    tls_pkt_size                  = state_ptr->pkt_size;
-    tls_ring_doorbell             = &ring_doorbell;
-    tls_last_published_submit_pos = state_ptr->next_submit_pos;
-    uint64_t start_submit_pos     = tls_submit_pos;
+    auto& tls                     = get_doorbell_tls();
+    tls.state                     = state_ptr;
+    tls.submit_pos                = state_ptr->next_submit_pos;
+    tls.pkt_size                  = state_ptr->pkt_size;
+    tls.ring_doorbell             = &ring_doorbell;
+    tls.last_published_submit_pos = state_ptr->next_submit_pos;
+    uint64_t start_submit_pos     = tls.submit_pos;
 
     auto*        qc = get_queue_controller();
     const Queue* queue =
@@ -755,14 +794,14 @@ process_doorbell_impl(const queue_state_ptr_t& state,
         // call local write_interceptor directly instead of heavyweight
         // Queue::invoke_write_interceptor
         write_interceptor(
-            const_cast<Queue*>(queue), source_snapshot.data(), pkt_count, ring_buffer_writer);
+            const_cast<Queue*>(queue), source_snapshot, pkt_count, ring_buffer_writer);
     }
     else
     {
-        ring_buffer_writer(source_snapshot.data(), pkt_count);
+        ring_buffer_writer(source_snapshot, pkt_count);
     }
 
-    uint64_t written = tls_submit_pos - start_submit_pos;
+    uint64_t written = tls.submit_pos - start_submit_pos;
     if(written != pkt_count)
     {
         ROCP_WARNING << "Write-interceptor changed packet count. "
@@ -771,7 +810,7 @@ process_doorbell_impl(const queue_state_ptr_t& state,
     }
 
     state_ptr->next_scan_pos   = scan_end;
-    state_ptr->next_submit_pos = tls_submit_pos;
+    state_ptr->next_submit_pos = tls.submit_pos;
 
     auto real_rdid = __atomic_load_n(state_ptr->real_rdid, __ATOMIC_ACQUIRE);
     auto ring_used = (state_ptr->next_submit_pos - real_rdid);
@@ -786,9 +825,9 @@ process_doorbell_impl(const queue_state_ptr_t& state,
 
     publish_submitted_packets(state_ptr, state_ptr->next_submit_pos);
 
-    tls_ring_doorbell             = nullptr;
-    tls_last_published_submit_pos = 0;
-    tls_state                     = nullptr;
+    tls.ring_doorbell             = nullptr;
+    tls.last_published_submit_pos = 0;
+    tls.state                     = nullptr;
 }
 
 std::shared_ptr<QueueState>
@@ -846,260 +885,112 @@ destroy_queue_state(const hsa_queue_t* queue)
 
 namespace
 {
-// --- add_write_index wrappers (4) ---
 namespace impl
 {
-uint64_t
-queue_add_write_index_relaxed(const hsa_queue_t* q, uint64_t v)
-{
-    if(should_bypass_inline_intercept())
-        return get_next_table()->hsa_queue_add_write_index_relaxed_fn(q, v);
+// The 16 wrappers differ only by HSA suffix + memory order; generated via macros below.
 
-    if(auto s = lookup_queue_state(q, s_intercept_dynamic.load(std::memory_order_acquire)); s)
-        return add_write_index_impl(s.get(), v, std::memory_order_relaxed);
-
-    return get_next_table()->hsa_queue_add_write_index_relaxed_fn(q, v);
-}
-
-uint64_t
-queue_add_write_index_scacq_screl(const hsa_queue_t* q, uint64_t v)
-{
-    if(should_bypass_inline_intercept())
-        return get_next_table()->hsa_queue_add_write_index_scacq_screl_fn(q, v);
-
-    if(auto s = lookup_queue_state(q, s_intercept_dynamic.load(std::memory_order_acquire)); s)
-        return add_write_index_impl(s.get(), v, std::memory_order_acq_rel);
-
-    return get_next_table()->hsa_queue_add_write_index_scacq_screl_fn(q, v);
-}
-
-uint64_t
-queue_add_write_index_scacquire(const hsa_queue_t* q, uint64_t v)
-{
-    if(should_bypass_inline_intercept())
-        return get_next_table()->hsa_queue_add_write_index_scacquire_fn(q, v);
-
-    if(auto s = lookup_queue_state(q, s_intercept_dynamic.load(std::memory_order_acquire)); s)
-        return add_write_index_impl(s.get(), v, std::memory_order_acquire);
-
-    return get_next_table()->hsa_queue_add_write_index_scacquire_fn(q, v);
-}
-
-uint64_t
-queue_add_write_index_screlease(const hsa_queue_t* q, uint64_t v)
-{
-    if(should_bypass_inline_intercept())
-        return get_next_table()->hsa_queue_add_write_index_screlease_fn(q, v);
-
-    if(auto s = lookup_queue_state(q, s_intercept_dynamic.load(std::memory_order_acquire)); s)
-        return add_write_index_impl(s.get(), v, std::memory_order_release);
-
-    return get_next_table()->hsa_queue_add_write_index_screlease_fn(q, v);
-}
-
-// --- store_write_index wrappers (2) ---
-
-void
-queue_store_write_index_relaxed(const hsa_queue_t* q, uint64_t v)
-{
-    if(should_bypass_inline_intercept())
-    {
-        get_next_table()->hsa_queue_store_write_index_relaxed_fn(q, v);
-        return;
+// add_write_index: uint64_t(const hsa_queue_t*, uint64_t)
+#define ROCP_QUEUE_ADD_WRITE_INDEX(SUFFIX, ORDER)                                                  \
+    uint64_t queue_add_write_index_##SUFFIX(const hsa_queue_t* q, uint64_t v)                      \
+    {                                                                                              \
+        if(should_bypass_inline_intercept())                                                       \
+            return get_next_table()->hsa_queue_add_write_index_##SUFFIX##_fn(q, v);                \
+        if(auto s = lookup_queue_state(q, s_intercept_dynamic.load(std::memory_order_acquire)); s) \
+            return add_write_index_impl(s.get(), v, ORDER);                                        \
+        return get_next_table()->hsa_queue_add_write_index_##SUFFIX##_fn(q, v);                    \
     }
 
-    if(auto s = lookup_queue_state(q, s_intercept_dynamic.load(std::memory_order_acquire)); s)
-    {
-        store_write_index_impl(s.get(), v, std::memory_order_relaxed);
-        return;
+ROCP_QUEUE_ADD_WRITE_INDEX(relaxed, std::memory_order_relaxed)
+ROCP_QUEUE_ADD_WRITE_INDEX(scacq_screl, std::memory_order_acq_rel)
+ROCP_QUEUE_ADD_WRITE_INDEX(scacquire, std::memory_order_acquire)
+ROCP_QUEUE_ADD_WRITE_INDEX(screlease, std::memory_order_release)
+
+#undef ROCP_QUEUE_ADD_WRITE_INDEX
+
+// store_write_index: void(const hsa_queue_t*, uint64_t)
+#define ROCP_QUEUE_STORE_WRITE_INDEX(SUFFIX, ORDER)                                                \
+    void queue_store_write_index_##SUFFIX(const hsa_queue_t* q, uint64_t v)                        \
+    {                                                                                              \
+        if(should_bypass_inline_intercept())                                                       \
+        {                                                                                          \
+            get_next_table()->hsa_queue_store_write_index_##SUFFIX##_fn(q, v);                     \
+            return;                                                                                \
+        }                                                                                          \
+        if(auto s = lookup_queue_state(q, s_intercept_dynamic.load(std::memory_order_acquire)); s) \
+        {                                                                                          \
+            store_write_index_impl(s.get(), v, ORDER);                                             \
+            return;                                                                                \
+        }                                                                                          \
+        get_next_table()->hsa_queue_store_write_index_##SUFFIX##_fn(q, v);                         \
     }
 
-    get_next_table()->hsa_queue_store_write_index_relaxed_fn(q, v);
-}
+ROCP_QUEUE_STORE_WRITE_INDEX(relaxed, std::memory_order_relaxed)
+ROCP_QUEUE_STORE_WRITE_INDEX(screlease, std::memory_order_release)
 
-void
-queue_store_write_index_screlease(const hsa_queue_t* q, uint64_t v)
-{
-    if(should_bypass_inline_intercept())
-    {
-        get_next_table()->hsa_queue_store_write_index_screlease_fn(q, v);
-        return;
+#undef ROCP_QUEUE_STORE_WRITE_INDEX
+
+// cas_write_index: uint64_t(const hsa_queue_t*, uint64_t expected, uint64_t value)
+#define ROCP_QUEUE_CAS_WRITE_INDEX(SUFFIX, ORDER)                                                  \
+    uint64_t queue_cas_write_index_##SUFFIX(                                                       \
+        const hsa_queue_t* q, uint64_t expected, uint64_t value)                                   \
+    {                                                                                              \
+        if(should_bypass_inline_intercept())                                                       \
+            return get_next_table()->hsa_queue_cas_write_index_##SUFFIX##_fn(q, expected, value);  \
+        if(auto s = lookup_queue_state(q, s_intercept_dynamic.load(std::memory_order_acquire)); s) \
+            return cas_write_index_impl(s.get(), expected, value, ORDER);                          \
+        return get_next_table()->hsa_queue_cas_write_index_##SUFFIX##_fn(q, expected, value);      \
     }
 
-    if(auto s = lookup_queue_state(q, s_intercept_dynamic.load(std::memory_order_acquire)); s)
-    {
-        store_write_index_impl(s.get(), v, std::memory_order_release);
-        return;
+ROCP_QUEUE_CAS_WRITE_INDEX(relaxed, std::memory_order_relaxed)
+ROCP_QUEUE_CAS_WRITE_INDEX(scacq_screl, std::memory_order_acq_rel)
+ROCP_QUEUE_CAS_WRITE_INDEX(scacquire, std::memory_order_acquire)
+ROCP_QUEUE_CAS_WRITE_INDEX(screlease, std::memory_order_release)
+
+#undef ROCP_QUEUE_CAS_WRITE_INDEX
+
+// load_write_index: uint64_t(const hsa_queue_t*)
+#define ROCP_QUEUE_LOAD_WRITE_INDEX(SUFFIX, ORDER)                                                 \
+    uint64_t queue_load_write_index_##SUFFIX(const hsa_queue_t* q)                                 \
+    {                                                                                              \
+        if(should_bypass_inline_intercept())                                                       \
+            return get_next_table()->hsa_queue_load_write_index_##SUFFIX##_fn(q);                  \
+        if(auto s = lookup_queue_state(q, s_intercept_dynamic.load(std::memory_order_acquire)); s) \
+            return load_write_index_impl(s.get(), ORDER);                                          \
+        return get_next_table()->hsa_queue_load_write_index_##SUFFIX##_fn(q);                      \
     }
 
-    get_next_table()->hsa_queue_store_write_index_screlease_fn(q, v);
-}
+ROCP_QUEUE_LOAD_WRITE_INDEX(relaxed, std::memory_order_relaxed)
+ROCP_QUEUE_LOAD_WRITE_INDEX(scacquire, std::memory_order_acquire)
 
-// --- cas_write_index wrappers (4) ---
+#undef ROCP_QUEUE_LOAD_WRITE_INDEX
 
-uint64_t
-queue_cas_write_index_relaxed(const hsa_queue_t* q, uint64_t expected, uint64_t value)
-{
-    if(should_bypass_inline_intercept())
-        return get_next_table()->hsa_queue_cas_write_index_relaxed_fn(q, expected, value);
-
-    if(auto s = lookup_queue_state(q, s_intercept_dynamic.load(std::memory_order_acquire)); s)
-        return cas_write_index_impl(s.get(), expected, value, std::memory_order_relaxed);
-
-    return get_next_table()->hsa_queue_cas_write_index_relaxed_fn(q, expected, value);
-}
-
-uint64_t
-queue_cas_write_index_scacq_screl(const hsa_queue_t* q, uint64_t expected, uint64_t value)
-{
-    if(should_bypass_inline_intercept())
-        return get_next_table()->hsa_queue_cas_write_index_scacq_screl_fn(q, expected, value);
-
-    if(auto s = lookup_queue_state(q, s_intercept_dynamic.load(std::memory_order_acquire)); s)
-        return cas_write_index_impl(s.get(), expected, value, std::memory_order_acq_rel);
-
-    return get_next_table()->hsa_queue_cas_write_index_scacq_screl_fn(q, expected, value);
-}
-
-uint64_t
-queue_cas_write_index_scacquire(const hsa_queue_t* q, uint64_t expected, uint64_t value)
-{
-    if(should_bypass_inline_intercept())
-        return get_next_table()->hsa_queue_cas_write_index_scacquire_fn(q, expected, value);
-
-    if(auto s = lookup_queue_state(q, s_intercept_dynamic.load(std::memory_order_acquire)); s)
-        return cas_write_index_impl(s.get(), expected, value, std::memory_order_acquire);
-
-    return get_next_table()->hsa_queue_cas_write_index_scacquire_fn(q, expected, value);
-}
-
-uint64_t
-queue_cas_write_index_screlease(const hsa_queue_t* q, uint64_t expected, uint64_t value)
-{
-    if(should_bypass_inline_intercept())
-        return get_next_table()->hsa_queue_cas_write_index_screlease_fn(q, expected, value);
-
-    if(auto s = lookup_queue_state(q, s_intercept_dynamic.load(std::memory_order_acquire)); s)
-        return cas_write_index_impl(s.get(), expected, value, std::memory_order_release);
-
-    return get_next_table()->hsa_queue_cas_write_index_screlease_fn(q, expected, value);
-}
-
-// --- load_write_index wrappers (2) ---
-
-uint64_t
-queue_load_write_index_relaxed(const hsa_queue_t* q)
-{
-    if(should_bypass_inline_intercept())
-        return get_next_table()->hsa_queue_load_write_index_relaxed_fn(q);
-
-    if(auto s = lookup_queue_state(q, s_intercept_dynamic.load(std::memory_order_acquire)); s)
-        return load_write_index_impl(s.get(), std::memory_order_relaxed);
-
-    return get_next_table()->hsa_queue_load_write_index_relaxed_fn(q);
-}
-
-uint64_t
-queue_load_write_index_scacquire(const hsa_queue_t* q)
-{
-    if(should_bypass_inline_intercept())
-        return get_next_table()->hsa_queue_load_write_index_scacquire_fn(q);
-
-    if(auto s = lookup_queue_state(q, s_intercept_dynamic.load(std::memory_order_acquire)); s)
-        return load_write_index_impl(s.get(), std::memory_order_acquire);
-
-    return get_next_table()->hsa_queue_load_write_index_scacquire_fn(q);
-}
-
-// --- signal_store wrappers (4) ---
-
-void
-signal_store_relaxed(hsa_signal_t sig, hsa_signal_value_t val)
-{
-    if(should_bypass_inline_intercept())
-    {
-        get_next_table()->hsa_signal_store_relaxed_fn(sig, val);
-        return;
+// signal stores: void(hsa_signal_t, hsa_signal_value_t); NAME selects hsa_signal_<NAME>_fn.
+#define ROCP_SIGNAL_STORE(NAME)                                                                    \
+    void signal_##NAME(hsa_signal_t sig, hsa_signal_value_t val)                                   \
+    {                                                                                              \
+        if(should_bypass_inline_intercept())                                                       \
+        {                                                                                          \
+            get_next_table()->hsa_signal_##NAME##_fn(sig, val);                                    \
+            return;                                                                                \
+        }                                                                                          \
+        /* it is too late to create queue state at this point so do not create if missing. */      \
+        constexpr auto create_if_missing = false;                                                  \
+        if(auto s = lookup_queue_state_by_doorbell(sig, create_if_missing); s)                     \
+        {                                                                                          \
+            process_doorbell_impl(s, val, [](hsa_signal_t db, hsa_signal_value_t v) {              \
+                get_next_table()->hsa_signal_##NAME##_fn(db, v);                                   \
+            });                                                                                    \
+            return;                                                                                \
+        }                                                                                          \
+        get_next_table()->hsa_signal_##NAME##_fn(sig, val);                                        \
     }
 
-    // it is too late to create queue state at this point so do not create if missing.
-    constexpr auto create_if_missing = false;
-    if(auto s = lookup_queue_state_by_doorbell(sig, create_if_missing); s)
-    {
-        process_doorbell_impl(s, val, [](hsa_signal_t db, hsa_signal_value_t v) {
-            get_next_table()->hsa_signal_store_relaxed_fn(db, v);
-        });
-        return;
-    }
+ROCP_SIGNAL_STORE(store_relaxed)
+ROCP_SIGNAL_STORE(store_screlease)
+ROCP_SIGNAL_STORE(silent_store_relaxed)
+ROCP_SIGNAL_STORE(silent_store_screlease)
 
-    get_next_table()->hsa_signal_store_relaxed_fn(sig, val);
-}
-
-void
-signal_store_screlease(hsa_signal_t sig, hsa_signal_value_t val)
-{
-    if(should_bypass_inline_intercept())
-    {
-        get_next_table()->hsa_signal_store_screlease_fn(sig, val);
-        return;
-    }
-
-    // it is too late to create queue state at this point so do not create if missing.
-    constexpr auto create_if_missing = false;
-    if(auto s = lookup_queue_state_by_doorbell(sig, create_if_missing); s)
-    {
-        process_doorbell_impl(s, val, [](hsa_signal_t db, hsa_signal_value_t v) {
-            get_next_table()->hsa_signal_store_screlease_fn(db, v);
-        });
-        return;
-    }
-
-    get_next_table()->hsa_signal_store_screlease_fn(sig, val);
-}
-
-void
-signal_silent_store_relaxed(hsa_signal_t sig, hsa_signal_value_t val)
-{
-    if(should_bypass_inline_intercept())
-    {
-        get_next_table()->hsa_signal_silent_store_relaxed_fn(sig, val);
-        return;
-    }
-
-    // it is too late to create queue state at this point so do not create if missing.
-    constexpr auto create_if_missing = false;
-    if(auto s = lookup_queue_state_by_doorbell(sig, create_if_missing); s)
-    {
-        process_doorbell_impl(s, val, [](hsa_signal_t db, hsa_signal_value_t v) {
-            get_next_table()->hsa_signal_silent_store_relaxed_fn(db, v);
-        });
-        return;
-    }
-
-    get_next_table()->hsa_signal_silent_store_relaxed_fn(sig, val);
-}
-
-void
-signal_silent_store_screlease(hsa_signal_t sig, hsa_signal_value_t val)
-{
-    if(should_bypass_inline_intercept())
-    {
-        get_next_table()->hsa_signal_silent_store_screlease_fn(sig, val);
-        return;
-    }
-
-    // it is too late to create queue state at this point so do not create if missing.
-    constexpr auto create_if_missing = false;
-    if(auto s = lookup_queue_state_by_doorbell(sig, create_if_missing); s)
-    {
-        process_doorbell_impl(s, val, [](hsa_signal_t db, hsa_signal_value_t v) {
-            get_next_table()->hsa_signal_silent_store_screlease_fn(db, v);
-        });
-        return;
-    }
-
-    get_next_table()->hsa_signal_silent_store_screlease_fn(sig, val);
-}
+#undef ROCP_SIGNAL_STORE
 }  // namespace impl
 }  // namespace
 
@@ -1137,6 +1028,7 @@ interposition_init(CoreApiTable* core_table, bool enabled)
     // Dynamic queue discovery: when enabled, the write-index wrappers create QueueState on
     // first encounter for queues we did not observe at hsa_queue_create. Enabled only when
     // attachment is not supported; in attachment mode this has been observed to deadlock.
+    // TODO(rocprofiler-sdk): root-cause the attachment-mode deadlock so it can be enabled there.
     s_intercept_dynamic.store(!registration::supports_attachment(), std::memory_order_release);
 
     // mark that intercept has been installed
