@@ -49,6 +49,9 @@ from utils.metrics.noise_clamper import (
 from utils.mi_gpu_spec import mi_gpu_specs
 from utils.parser import (
     PC_SAMPLING_NOT_ISSUE_PREFIX,
+    load_code_obj_info,
+    match_instruction_for_offset,
+    split_instruction_comment,
 )
 from utils.roofline_calc import (
     CACHE_HIERARCHY,
@@ -59,6 +62,41 @@ from utils.roofline_calc import (
 from utils.utils_analysis import PEAK_COL_PREFERENCE, VALUE_COL_PREFERENCE
 from utils.utils_common import get_uuid, get_version
 from utils.utils_counter_defs import extract_counters_and_variables, get_build_in_vars
+
+_PC_NATIVE_COLUMNS = ("instruction", "source_line", "source_file", "line")
+
+
+def _attribute_pc_samples_native(
+    grouped_df: pd.DataFrame,
+    code_obj_info: dict[int, list[dict[str, Any]]],
+) -> dict[str, list[Optional[str]]]:
+    """Attribute grouped PC samples to native ISA instructions.
+
+    Returns the ``instruction``/``source_line``/``source_file``/``line`` columns
+    keyed by name. The per-code-object offset key lists are built once here so the
+    per-sample lookup stays O(log N) instead of rebuilding the list on every row.
+    """
+    columns: dict[str, list[Optional[str]]] = {col: [] for col in _PC_NATIVE_COLUMNS}
+    offsets_by_coid = {
+        coid: [inst["code_obj_offset"] for inst in intervals]
+        for coid, intervals in code_obj_info.items()
+    }
+    for coid, off in zip(
+        grouped_df["code_object_id"], grouped_df["code_object_offset"]
+    ):
+        intervals = code_obj_info.get(coid, [])
+        inst = match_instruction_for_offset(intervals, off, offsets_by_coid.get(coid))
+        if inst is not None:
+            source_file, line = split_instruction_comment(inst["comment"])
+            columns["instruction"].append(inst["name"])
+            columns["source_line"].append(inst["comment"])
+            columns["source_file"].append(source_file)
+            columns["line"].append(line)
+        else:
+            console_debug(f"No native instruction for code_object {coid} offset {off}.")
+            for col in _PC_NATIVE_COLUMNS:
+                columns[col].append(None)
+    return columns
 
 
 class db_analysis(OmniAnalyze_Base):
@@ -372,9 +410,14 @@ class db_analysis(OmniAnalyze_Base):
         pc_sampling_data_per_workload: dict[str, pd.DataFrame] = {}
 
         for workload_path in self._runs.keys():
+            # PC sample records (counts, code_object_id/offset, stall reasons)
+            # always come from the rocprofiler-sdk results file; the native
+            # code_obj_info.json only supplies instruction/source attribution.
             if not (Path(workload_path) / "ps_file_results.json").exists():
                 console_warning(f"PC sampling data not found for {workload_path}.")
                 continue
+
+            code_obj_info = load_code_obj_info(Path(workload_path))
 
             pc_sampling_data = json.loads(
                 (Path(workload_path) / "ps_file_results.json").read_text()
@@ -453,18 +496,39 @@ class db_analysis(OmniAnalyze_Base):
                 .reset_index()
             )
 
-            grouped_df["instruction"] = grouped_df["inst_index"].apply(
-                lambda x: (
-                    pc_sampling_instruction[x]
-                    if x < len(pc_sampling_instruction)
-                    else None
+            if code_obj_info is not None:
+                # Native path: attribute samples using the native disassembly.
+                console_debug(
+                    "Attributing PC samples using native *_code_obj_info.json "
+                    f"for {workload_path}."
                 )
-            )
-            grouped_df["source_line"] = grouped_df["inst_index"].apply(
-                lambda x: (
-                    pc_sampling_comments[x] if x < len(pc_sampling_comments) else None
+                native_columns = _attribute_pc_samples_native(grouped_df, code_obj_info)
+                for col, values in native_columns.items():
+                    grouped_df[col] = values
+            else:
+                # Fallback path: native *_code_obj_info.json not found; use the
+                # rocprofiler-sdk strings indexed by inst_index.
+                console_debug(
+                    "Native *_code_obj_info.json not found; using "
+                    f"rocprofiler-sdk strings for {workload_path}."
                 )
-            )
+                grouped_df["instruction"] = grouped_df["inst_index"].apply(
+                    lambda x: (
+                        pc_sampling_instruction[x]
+                        if x < len(pc_sampling_instruction)
+                        else None
+                    )
+                )
+                grouped_df["source_line"] = grouped_df["inst_index"].apply(
+                    lambda x: (
+                        pc_sampling_comments[x]
+                        if x < len(pc_sampling_comments)
+                        else None
+                    )
+                )
+                grouped_df["source_file"] = None
+                grouped_df["line"] = None
+
             grouped_df["kernel_name"] = grouped_df["code_object_id"].apply(
                 lambda x: pc_sampling_kernel_name_dict.get(x)
             )

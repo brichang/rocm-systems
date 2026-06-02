@@ -2,6 +2,7 @@
 # SPDX-License-Identifier:  MIT
 
 import argparse
+import bisect
 import json
 import re
 from pathlib import Path
@@ -865,6 +866,116 @@ def load_pc_sampling_data(
     else:
         console_warning("PC sampling: No data")
         return pd.DataFrame()
+
+
+def split_instruction_comment(
+    comment: Optional[str],
+) -> tuple[Optional[str], Optional[str]]:
+    """Split an ISA comment at the last ':' into (source_file, line).
+
+    Returns (None, None) when comment is empty/None, contains no ':', or either
+    side of the last ':' is empty. The line is always returned as a string.
+
+    Examples:
+        "/a/b.cpp:42" -> ("/a/b.cpp", "42")
+        "C:/x.cpp:5"  -> ("C:/x.cpp", "5")  # splits on the last ':'
+    """
+    if not comment:
+        return None, None
+
+    source_file, sep, line = comment.rpartition(":")
+    if not sep or not source_file or not line:
+        return None, None
+
+    return source_file, line
+
+
+@demarcate
+def load_code_obj_info(
+    workload_path: Path,
+) -> Optional[dict[int, list[dict[str, Any]]]]:
+    """Discover and load native code-object disassembly for a workload.
+
+    Globs ``workload_path`` for ``*_code_obj_info.json`` files. Multi-process
+    captures emit one file per PID; all matches are merged and keyed by code
+    object id. Returns None when no native files are found.
+
+    Each per-id list contains instruction dicts with keys ``code_obj_offset``,
+    ``size``, ``name``, and ``comment``, sorted ascending by ``code_obj_offset``
+    so callers can bisect.
+    """
+    native_files = sorted(workload_path.glob("*_code_obj_info.json"))
+    if not native_files:
+        return None
+
+    merged: dict[int, list[dict[str, Any]]] = {}
+
+    for native_file in native_files:
+        with native_file.open() as fh:
+            data = json.load(fh)
+
+        for code_object in data.get("code_objects", []):
+            code_object_id = code_object.get("id")
+            if code_object_id is None:
+                continue
+
+            instructions = merged.setdefault(code_object_id, [])
+            for symbol in code_object.get("symbols", []):
+                for inst in symbol.get("instructions", []):
+                    offset = inst.get("code_obj_offset")
+                    size = inst.get("size")
+                    if offset is None or size is None:
+                        # Skip malformed entries so one bad record does not break
+                        # the sort / lookup for the whole workload.
+                        continue
+                    instructions.append({
+                        "code_obj_offset": offset,
+                        "size": size,
+                        "name": inst.get("name"),
+                        "comment": inst.get("comment"),
+                    })
+
+    for instructions in merged.values():
+        instructions.sort(key=lambda inst: inst["code_obj_offset"])
+
+    console_debug(f"PC sampling: merged {len(native_files)} native code-object file(s)")
+
+    return merged
+
+
+def match_instruction_for_offset(
+    intervals: list[dict[str, Any]],
+    offset: int,
+    offsets: Optional[list[int]] = None,
+) -> Optional[dict[str, Any]]:
+    """Return the instruction whose range contains ``offset``, else None.
+
+    ``intervals`` must be sorted ascending by ``code_obj_offset`` (as produced by
+    ``load_code_obj_info``). An instruction matches when
+    ``code_obj_offset <= offset < code_obj_offset + size``. An empty list or an
+    unmatched offset returns None. Never raises for unknown ids because callers
+    pass ``intervals.get(code_object_id, [])``.
+
+    ``offsets`` is the precomputed ascending ``code_obj_offset`` key list for
+    ``intervals``; pass it when matching many offsets against the same intervals
+    to avoid rebuilding the key list on every call.
+    """
+    if not intervals:
+        return None
+
+    if offsets is None:
+        offsets = [inst["code_obj_offset"] for inst in intervals]
+    idx = bisect.bisect_right(offsets, offset) - 1
+    if idx < 0:
+        return None
+
+    candidate = intervals[idx]
+    start = candidate["code_obj_offset"]
+    size = candidate.get("size")
+    if size is not None and start <= offset < start + size:
+        return candidate
+
+    return None
 
 
 def nullify_unevaluated_metric_values(

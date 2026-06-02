@@ -10,6 +10,10 @@ Full documentation for ROCm Compute Profiler is available at [https://rocm.docs.
 
 * Added backward compatibility for live attach mode to work with older ROCm 7.x.x releases.
 
+* Added source-line and ISA attribution for PC sampling analysis from the native collection tool's code-object disassembly.
+  * `rocprof-compute analyze` maps each sampled offset to its containing ISA instruction and resolves the originating source file and line from the native tool's `*_code_obj_info.json`, falling back to rocprofiler-sdk instruction and comment strings when that file is absent.
+  * PC sampling collection snapshots the referenced source files into a `code_obj_sources/` directory in the workload output so source-line attribution stays valid when the capture is analyzed on another host.
+
 ### Changed
 
 * Moved `--gui` and `--tui` analyze options to experimental status. These features now require the `--experimental` flag to be enabled (e.g., `rocprof-compute analyze --experimental --gui`).

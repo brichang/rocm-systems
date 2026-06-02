@@ -3,9 +3,11 @@
 #include "pc_sampling_collector.h"
 
 #include "gsl_assert.h"
+#include "source_snapshot.h"
 
 #include <ios>
 #include <iostream>
+#include <unordered_set>
 
 using namespace rocprofiler_compute_tool;
 
@@ -60,4 +62,39 @@ void pc_sampling_collector_impl_t::write(code_object_writer_t& writer)
         }
         writer.end_code_obj();
     }
+}
+
+std::vector<std::string> pc_sampling_collector_impl_t::collect_source_paths()
+{
+    std::vector<std::string>        result;
+    std::unordered_set<std::string> seen;
+
+    for (const auto& id : m_translator->get_code_object_ids())
+    {
+        const auto& symbols = m_translator->get_symbols(id);
+        for (const auto& sym : symbols)
+        {
+            uint64_t       pc  = sym.virtual_address;
+            const uint64_t end = sym.virtual_address + sym.size;
+            while (pc < end)
+            {
+                const auto& inst = m_translator->get_instruction(id, pc);
+                if (inst.size == 0)
+                {
+                    // Best-effort: avoid an infinite loop without aborting the run.
+                    break;
+                }
+                if (auto path = parse_source_path(inst.comment))
+                {
+                    if (seen.insert(*path).second)
+                    {
+                        result.push_back(*path);
+                    }
+                }
+                pc += inst.size;
+            }
+        }
+    }
+
+    return result;
 }

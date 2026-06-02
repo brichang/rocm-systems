@@ -1,6 +1,6 @@
 .. meta::
    :description: ROCm Compute Profiler: using PC sampling
-   :keywords: ROCm Compute Profiler, PC sampling
+   :keywords: ROCm Compute Profiler, PC sampling, ISA attribution, source snapshot, code object
 
 ********************************************
 Using PC sampling in ROCm Compute Profiler
@@ -39,6 +39,39 @@ For using analysis options for PC sampling the configuration needed are:
 .. code-block:: shell
 
    $ rocprof-compute analyze -p workloads/pc_test/MI300A_A1/ -b 21 -k 0 --pc-sampling-sorting-type offset
+
+Source and instruction attribution
+-----------------------------------
+
+When PC sampling collection routes through the
+:ref:`native counter collection tool <core-install-native-tool>` (the default on
+ROCm 7.x and later), the tool disassembles the loaded code objects and records the
+mapping from each instruction offset to its assembly text and originating source
+location in a ``*_code_obj_info.json`` file (one per process) in the workload output
+directory. During
+analysis, ``rocprof-compute analyze`` attributes each sampled program counter to the
+ISA instruction whose offset range contains it, and resolves the originating source
+file and line from that instruction's debug comment.
+
+If a workload was captured without the native tool (for example, with
+``--no-native-tool`` or on ROCm versions earlier than 7.x), no
+``*_code_obj_info.json`` is present and analysis falls back to the assembly and
+source strings reported by ``rocprofiler-sdk``.
+
+Source file snapshot
+--------------------
+
+So that source-line attribution stays valid even when a workload is analyzed on a
+different machine than the one it was captured on, PC sampling collection snapshots
+the source files referenced by the code object into a ``code_obj_sources/`` directory
+inside the workload output directory, reproducing each file's path. Files that cannot
+be read at collection time are skipped without failing the capture.
+
+.. note::
+
+  To populate source attribution, build the profiling target app with ``-g`` so the
+  source locations are retained in the code object. Without debug symbols, samples are
+  associated with assembly lines only.
 
 **Sample output:**
 

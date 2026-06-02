@@ -3,6 +3,9 @@
 #include "pc_sampling_feature.h"
 
 #include "code_object_writer.h"
+#include "source_snapshot.h"
+
+#include <filesystem>
 
 using namespace rocprofiler_compute_tool;
 
@@ -40,4 +43,9 @@ void pc_sampling_feature_t::finalize()
     code_object_writer_json_t writer;
     m_collector->write(writer);
     writer.flush(m_output_path);
+
+    auto base = m_output_path.parent_path();
+    if (base.empty())
+        base = ".";
+    copy_source_files(m_collector->collect_source_paths(), base / "code_obj_sources");
 }

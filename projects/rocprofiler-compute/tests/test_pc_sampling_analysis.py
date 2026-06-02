@@ -9,6 +9,7 @@ import common
 import pandas as pd
 import pytest
 
+from rocprof_compute_analyze.analysis_db import db_analysis
 from utils import schema
 from utils.file_io import (
     build_agent_to_gpu_map,
@@ -16,10 +17,13 @@ from utils.file_io import (
 )
 from utils.parser import (
     PMC_KERNEL_TOP_TABLE_ID,
+    load_code_obj_info,
     load_pc_sampling_data,
     load_pc_sampling_data_per_kernel,
+    match_instruction_for_offset,
     nullify_unevaluated_metric_values,
     search_pc_sampling_record,
+    split_instruction_comment,
 )
 
 PC_SAMPLING_WORKLOAD = "tests/workloads/vcopy_pc_sampling_only/MI300A_A1"
@@ -823,3 +827,321 @@ def test_pc_sampling_analyze_list_stats(
         assert "Dispatch list" in captured.out
     finally:
         common.clean_output_dir(True, workload_dir)
+
+
+# ═══════════════════════════════════════════════════════════════
+# split_instruction_comment
+# ═══════════════════════════════════════════════════════════════
+
+
+def test_split_instruction_comment_basic() -> None:
+    """Split a simple comment into (source_file, line) at the ':'."""
+    assert split_instruction_comment("/a/b.cpp:42") == ("/a/b.cpp", "42")
+
+
+def test_split_instruction_comment_splits_on_last_colon() -> None:
+    """Split on the LAST ':' so Windows-style drive prefixes survive."""
+    assert split_instruction_comment("C:/x.cpp:5") == ("C:/x.cpp", "5")
+
+
+def test_split_instruction_comment_line_is_str() -> None:
+    """The returned line is always a string instance, never an int."""
+    _, line = split_instruction_comment("/a/b.cpp:42")
+    assert isinstance(line, str)
+
+
+def test_split_instruction_comment_empty_string() -> None:
+    """An empty comment yields (None, None)."""
+    assert split_instruction_comment("") == (None, None)
+
+
+def test_split_instruction_comment_none() -> None:
+    """A None comment yields (None, None)."""
+    assert split_instruction_comment(None) == (None, None)
+
+
+def test_split_instruction_comment_no_colon() -> None:
+    """A comment with no ':' yields (None, None)."""
+    assert split_instruction_comment("noColon") == (None, None)
+
+
+def test_split_instruction_comment_empty_side() -> None:
+    """An empty file or line side yields (None, None)."""
+    assert split_instruction_comment(":42") == (None, None)
+    assert split_instruction_comment("/a/b.cpp:") == (None, None)
+
+
+# ═══════════════════════════════════════════════════════════════
+# Helpers for native code-object JSON
+# ═══════════════════════════════════════════════════════════════
+
+
+def _write_code_obj_info(
+    path: Path,
+    code_object_id: int,
+    symbol_name: str,
+    instructions: list[dict],
+) -> Path:
+    """Write a minimal ``*_code_obj_info.json`` file for one code object."""
+    data = {
+        "code_objects": [
+            {
+                "id": code_object_id,
+                "symbols": [
+                    {
+                        "name": symbol_name,
+                        "code_object_offset": 0,
+                        "virtual_address": 1000,
+                        "size": sum(i.get("size", 0) for i in instructions),
+                        "instructions": instructions,
+                    }
+                ],
+            }
+        ]
+    }
+    path.write_text(json.dumps(data))
+    return path
+
+
+def _vec_copy_instructions() -> list[dict]:
+    """Two synthetic instructions for a vecCopy symbol."""
+    return [
+        {
+            "name": "s_load_b64",
+            "comment": "/home/u/kernel.hip:42",
+            "virtual_address": 1000,
+            "code_obj_offset": 0,
+            "size": 4,
+        },
+        {
+            "name": "v_add_u32",
+            "comment": "/home/u/kernel.hip:43",
+            "virtual_address": 1004,
+            "code_obj_offset": 4,
+            "size": 4,
+        },
+    ]
+
+
+# ═══════════════════════════════════════════════════════════════
+# load_code_obj_info
+# ═══════════════════════════════════════════════════════════════
+
+
+def test_load_code_obj_info_none_when_absent(tmp_path: Path) -> None:
+    """Return None when the directory has no ``*_code_obj_info.json``."""
+    assert load_code_obj_info(tmp_path) is None
+
+
+def test_load_code_obj_info_sorted_intervals(tmp_path: Path) -> None:
+    """Return per-id instruction lists sorted ascending by code_obj_offset."""
+    # Write instructions out of offset order to verify sorting.
+    _write_code_obj_info(
+        tmp_path / "12345_code_obj_info.json",
+        code_object_id=2,
+        symbol_name="vecCopy",
+        instructions=[
+            {
+                "name": "v_add_u32",
+                "comment": "/home/u/kernel.hip:43",
+                "code_obj_offset": 4,
+                "size": 4,
+            },
+            {
+                "name": "s_load_b64",
+                "comment": "/home/u/kernel.hip:42",
+                "code_obj_offset": 0,
+                "size": 4,
+            },
+        ],
+    )
+    merged = load_code_obj_info(tmp_path)
+    assert merged is not None
+    assert set(merged.keys()) == {2}
+    offsets = [inst["code_obj_offset"] for inst in merged[2]]
+    assert offsets == [0, 4]
+    assert merged[2][0]["name"] == "s_load_b64"
+    assert merged[2][0]["comment"] == "/home/u/kernel.hip:42"
+
+
+def test_load_code_obj_info_multi_pid_merge(tmp_path: Path) -> None:
+    """Merge two per-PID files so both code object ids are present."""
+    _write_code_obj_info(
+        tmp_path / "111_code_obj_info.json",
+        code_object_id=2,
+        symbol_name="vecCopy",
+        instructions=_vec_copy_instructions(),
+    )
+    _write_code_obj_info(
+        tmp_path / "222_code_obj_info.json",
+        code_object_id=3,
+        symbol_name="vecAdd",
+        instructions=[
+            {
+                "name": "v_mul_f32",
+                "comment": "/home/u/add.hip:7",
+                "code_obj_offset": 0,
+                "size": 8,
+            }
+        ],
+    )
+    merged = load_code_obj_info(tmp_path)
+    assert merged is not None
+    assert set(merged.keys()) == {2, 3}
+    assert len(merged[2]) == 2
+    assert merged[3][0]["name"] == "v_mul_f32"
+
+
+# ═══════════════════════════════════════════════════════════════
+# match_instruction_for_offset
+# ═══════════════════════════════════════════════════════════════
+
+
+def _intervals() -> list[dict]:
+    """Two adjacent 4-byte intervals: [0,4) and [4,8)."""
+    return [
+        {"code_obj_offset": 0, "size": 4, "name": "s_load_b64"},
+        {"code_obj_offset": 4, "size": 4, "name": "v_add_u32"},
+    ]
+
+
+def test_match_instruction_for_offset_inside_interval() -> None:
+    """An offset inside an interval returns that instruction."""
+    intervals = _intervals()
+    assert match_instruction_for_offset(intervals, 0)["name"] == "s_load_b64"
+    assert match_instruction_for_offset(intervals, 3)["name"] == "s_load_b64"
+    assert match_instruction_for_offset(intervals, 4)["name"] == "v_add_u32"
+    assert match_instruction_for_offset(intervals, 7)["name"] == "v_add_u32"
+
+
+def test_match_instruction_for_offset_past_all_ranges() -> None:
+    """An offset past every interval returns None."""
+    assert match_instruction_for_offset(_intervals(), 8) is None
+    assert match_instruction_for_offset(_intervals(), 100) is None
+
+
+def test_match_instruction_for_offset_in_gap_or_before_first() -> None:
+    """An offset before the first interval (in a gap) returns None."""
+    gapped = [
+        {"code_obj_offset": 4, "size": 4, "name": "v_add_u32"},
+        {"code_obj_offset": 16, "size": 4, "name": "v_mul_f32"},
+    ]
+    # Before the first interval.
+    assert match_instruction_for_offset(gapped, 0) is None
+    # In the gap between [4,8) and [16,20).
+    assert match_instruction_for_offset(gapped, 10) is None
+
+
+def test_match_instruction_for_offset_empty_list() -> None:
+    """An empty interval list returns None."""
+    assert match_instruction_for_offset([], 0) is None
+
+
+def test_match_instruction_for_offset_unknown_id_via_get() -> None:
+    """Simulate an unknown code object id by passing .get(99, []) -> None."""
+    code_obj_info = {2: _intervals()}
+    assert match_instruction_for_offset(code_obj_info.get(99, []), 0) is None
+
+
+# ═══════════════════════════════════════════════════════════════
+# calc_pc_sampling_data (db_analysis method)
+# ═══════════════════════════════════════════════════════════════
+
+
+class _StubRuns:
+    """Minimal stand-in for db_analysis exposing only ``_runs``.
+
+    ``calc_pc_sampling_data`` iterates ``self._runs.keys()`` (workload-path
+    strings) and reads files from disk, so the only attribute it needs is
+    ``_runs``. We invoke the method unbound on this stub to avoid the heavy
+    real ``db_analysis`` constructor.
+    """
+
+    def __init__(self, workload_paths: list[str]) -> None:
+        self._runs = {path: None for path in workload_paths}
+
+
+_PC_SAMPLING_EXPECTED_COLS = {
+    "offset",
+    "count",
+    "count_issued",
+    "count_stalled",
+    "stall_reason",
+    "kernel_name",
+    "instruction",
+    "source_line",
+    "source_file",
+    "line",
+}
+
+
+def test_calc_pc_sampling_data_native_branch(tmp_path: Path) -> None:
+    """NATIVE branch: range-match samples against synthetic disassembly."""
+    # Samples landing on offset 0 (s_load_b64) and offset 4 (v_add_u32),
+    # both in code object id 2.
+    samples = [
+        _make_record(2, 0, inst_index=0, dispatch_id=0),
+        _make_record(2, 4, inst_index=1, dispatch_id=1),
+    ]
+    _write_json(
+        tmp_path / "ps_file_results.json",
+        stochastic=samples,
+        instructions=["UNUSED_INST_0", "UNUSED_INST_1"],
+        comments=["unused:0", "unused:1"],
+        kernel_symbols=[{"code_object_id": 2, "formatted_kernel_name": "vecCopy"}],
+    )
+    _write_code_obj_info(
+        tmp_path / "12345_code_obj_info.json",
+        code_object_id=2,
+        symbol_name="vecCopy",
+        instructions=_vec_copy_instructions(),
+    )
+
+    stub = _StubRuns([str(tmp_path)])
+    result = db_analysis.calc_pc_sampling_data(stub)
+
+    df = result[str(tmp_path)]
+    assert _PC_SAMPLING_EXPECTED_COLS.issubset(set(df.columns))
+
+    # Native attribution: row for offset 0 -> s_load_b64 / kernel.hip:42.
+    row0 = df[df["offset"] == 0].iloc[0]
+    assert row0["instruction"] == "s_load_b64"
+    assert row0["source_line"] == "/home/u/kernel.hip:42"
+    assert row0["source_file"] == "/home/u/kernel.hip"
+    assert row0["line"] == "42"
+    assert row0["kernel_name"] == "vecCopy"
+
+    row4 = df[df["offset"] == 4].iloc[0]
+    assert row4["instruction"] == "v_add_u32"
+    assert row4["source_file"] == "/home/u/kernel.hip"
+    assert row4["line"] == "43"
+
+
+def test_calc_pc_sampling_data_fallback_branch(tmp_path: Path) -> None:
+    """FALLBACK branch: no native JSON -> use SDK strings by inst_index."""
+    samples = [
+        _make_record(100, 0x10, inst_index=0, dispatch_id=0),
+        _make_record(100, 0x20, inst_index=1, dispatch_id=1),
+    ]
+    _write_json(
+        tmp_path / "ps_file_results.json",
+        stochastic=samples,
+        instructions=["v_mov_b32", "s_waitcnt"],
+        comments=["/src/vcopy.cpp:42", "/src/vcopy.cpp:43"],
+        kernel_symbols=[{"code_object_id": 100, "formatted_kernel_name": "vecCopy"}],
+    )
+
+    stub = _StubRuns([str(tmp_path)])
+    result = db_analysis.calc_pc_sampling_data(stub)
+
+    df = result[str(tmp_path)]
+    assert _PC_SAMPLING_EXPECTED_COLS.issubset(set(df.columns))
+
+    # inst_index 0 maps to the first SDK string/comment.
+    row0 = df[df["offset"] == 0x10].iloc[0]
+    assert row0["instruction"] == "v_mov_b32"
+    assert row0["source_line"] == "/src/vcopy.cpp:42"
+    # Fallback path leaves source_file / line unset.
+    assert row0["source_file"] is None
+    assert row0["line"] is None
+    assert row0["kernel_name"] == "vecCopy"
