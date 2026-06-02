@@ -72,6 +72,7 @@
 #include "library_info_tester.hpp"
 #include "fence_ordering_tester.hpp"
 #include "tile_rma_tester.hpp"
+#include "team_split_2d_tester.hpp"
 
 #include "backend_bc.hpp"
 extern Backend* backend;
@@ -707,6 +708,10 @@ std::vector<Tester*> Tester::create(TesterArguments args) {
       test_name = "Tile Get Arbitrary Strides";
       testers.push_back(new TileRMATester(args));
       break;
+    case TeamSplit2DTestType:
+      test_name = "Team Split 2D";
+      testers.push_back(new TeamSplit2DTester(args));
+      break;
     default:
       test_name = "Empty";
       break;
@@ -793,7 +798,8 @@ void Tester::execute() {
         _type != TeamCtxInfraBlockTestType  &&
         _type != TeamCtxInfraOddEvenTestType &&
         _type != TeamCtxSharedInfraTestType &&
-        _type != TeamCtxSubsetParentInfraTestType ) {
+        _type != TeamCtxSubsetParentInfraTestType &&
+        _type != TeamSplit2DTestType  ) {
       print(size);
     }
   }

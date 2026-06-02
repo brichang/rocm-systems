@@ -158,7 +158,8 @@
   X(TileGetWaveContiguous,     113)  \
   X(TileGetRowMajor,           114)  \
   X(TileGetColumnMajor,        115)  \
-  X(TileGetArbitrary,          116)
+  X(TileGetArbitrary,          116)  \
+  X(TeamSplit2D,               117)
 
 #define _ROCSHMEM_ENUM_ENTRY(name, val) name##TestType = val,
 enum TestType {
