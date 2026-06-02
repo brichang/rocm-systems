@@ -848,6 +848,50 @@ def process_rocprofv3_output(workload_dir: str, using_native_tool: bool) -> list
     return results_files_csv
 
 
+# Per-row backend suffix produced by inject_roctx._push_scope / push_user_scope:
+# "<op_path>:#<ctx>|<backend>". Mirrors the format in _core.py.
+_DEFAULT_BACKEND = "torch"
+_BACKEND_SUFFIX_RE = re.compile(r"\|(\w+)$")
+
+
+def _parse_function_backend(function_value: str) -> tuple[str, str]:
+    """Return (clean_function, backend) for one marker_api_trace Name cell.
+
+    Splits off a trailing ``|<backend>`` suffix from the wire form and
+    returns it as the row's Backend. Wires without a suffix (pre-tagging
+    workloads and the C++ tier's auto-emitted ATen leaves) default to
+    "torch".
+    """
+    if function_value is None:
+        return "", _DEFAULT_BACKEND
+    raw = str(function_value)
+    match = _BACKEND_SUFFIX_RE.search(raw)
+    if match is None:
+        return raw, _DEFAULT_BACKEND
+    return raw[: match.start()], match.group(1)
+
+
+def _augment_marker_csv(src_marker: str, dst_marker: str) -> None:
+    """Copy src_marker to dst_marker, splitting the wire backend suffix
+    out of Function and into a dedicated Backend column.
+
+    Rows without a ``|<backend>`` suffix get Backend="torch".
+    """
+    rows, fieldnames = csv_ops.read_csv_as_dicts(src_marker)
+    if "Function" not in fieldnames:
+        # Schema we don't recognize: copy verbatim rather than corrupt it.
+        shutil.copyfile(src_marker, dst_marker)
+        return
+    augmented_fieldnames = list(fieldnames)
+    if "Backend" not in augmented_fieldnames:
+        augmented_fieldnames.append("Backend")
+    for row in rows:
+        clean_function, backend = _parse_function_backend(row.get("Function", ""))
+        row["Function"] = clean_function
+        row["Backend"] = backend
+    csv_ops.write_csv_from_dicts(dst_marker, rows, fieldnames=augmented_fieldnames)
+
+
 @demarcate
 def save_api_trace_inputs(
     workload_dir: str,
@@ -857,6 +901,10 @@ def save_api_trace_inputs(
     """
     Move counter_collection and marker_api_trace data to workload_dir,
     for creation of API trace in Analyze mode.
+
+    Marker CSVs are augmented on copy: the trailing ``|<backend>`` suffix
+    written by inject_roctx is split off Function and surfaced as a
+    dedicated Backend column (torch, triton, ...).
     """
     src_dir = Path(workload_dir) / "out" / "pmc_1"
     if output_format == "rocpd":
@@ -865,10 +913,9 @@ def save_api_trace_inputs(
         src_marker = src_dir / f"{fbase}_marker_api_trace.csv"
         dst_counter = Path(workload_dir) / f"api_trace_{fbase}_counter_collection.csv"
         dst_marker = Path(workload_dir) / f"api_trace_{fbase}_marker_api_trace.csv"
-        # These files are expected to exist
-        # Letting shutil.copyfile raise error if files not found
+        # These files are expected to exist; let underlying IO raise on miss.
         shutil.copyfile(src_counter, dst_counter)
-        shutil.copyfile(src_marker, dst_marker)
+        _augment_marker_csv(str(src_marker), str(dst_marker))
         console_log(
             "api trace",
             "Moved counter collection and marker trace files "
@@ -881,8 +928,7 @@ def save_api_trace_inputs(
         counter_files = list(src_dir.glob("*/*_counter_collection.csv"))
         marker_files = list(src_dir.glob("*/*_marker_api_trace.csv"))
         (Path(workload_dir) / f"{fbase}").mkdir(parents=True, exist_ok=True)
-        # Expecting the files to be present
-        # Letting shutil.copyfile raise error if files not found
+        # Expecting the files to be present; let underlying IO raise on miss.
         # Path: workload_dir/fbase/api_trace_<src_basename> (discovered by
         # process_api_trace_output via glob **/api_trace*_marker_api_trace.csv)
         for src_counter in counter_files:
@@ -897,7 +943,7 @@ def save_api_trace_inputs(
             dst_marker = str(
                 Path(workload_dir) / f"{fbase}" / ("api_trace_" + Path(src_marker).name)
             )
-            shutil.copyfile(src_marker, dst_marker)
+            _augment_marker_csv(src_marker, dst_marker)
             console_log("api trace", f"Copied Marker API Trace: {dst_marker}")
     else:
         console_warning(

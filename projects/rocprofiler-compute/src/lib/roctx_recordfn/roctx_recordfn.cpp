@@ -380,9 +380,11 @@ void end_cb(const at::RecordFunction& /*fn*/, at::ObserverContext* obs_ctx)
     }
 }
 
-// Pushes a USER_SCOPE frame on the calling thread. All-or-nothing:
-// partial failures roll back and rethrow.
-void push_user_scope(const std::string& marker, const std::string& context)
+// Main-thread USER_SCOPE push. All-or-nothing: partial failures roll
+// back and rethrow so the Python caller can fall through to its tier.
+// `backend`, when non-empty, is appended to the emitted range as
+// "|<backend>" so utils_profile._augment_marker_csv can attribute the row.
+void push_user_scope(const std::string& marker, const std::string& context, const std::string& backend)
 {
     bool pushed_to_stack  = false;
     bool pushed_to_guards = false;
@@ -409,7 +411,12 @@ void push_user_scope(const std::string& marker, const std::string& context)
         g_dbg_guards.push_back(std::move(guard));
         pushed_to_guards = true;
 
-        const std::string full = build_marker_string(g_stack);
+        std::string full = build_marker_string(g_stack);
+        if (!backend.empty())
+        {
+            full += '|';
+            full += backend;
+        }
         roctxRangePushA(full.c_str());
         pushed_roctx = true;
 
@@ -549,9 +556,10 @@ PYBIND11_MODULE(roctx_recordfn, m)
           &push_user_scope,
           pybind11::arg("marker"),
           pybind11::arg("context"),
-          "Push a USER_SCOPE frame on the calling thread.");
-    m.def("pop_user_scope", &pop_user_scope, "Pop the most recent USER_SCOPE frame on the calling thread.");
-    m.def("dump_stats", &dump_stats, "Return internal counters.");
-    m.def("start_capture", &start_capture, "Begin recording emitted marker strings.");
-    m.def("stop_capture", &stop_capture, "Stop recording and return the captured marker strings.");
+          pybind11::arg("backend") = std::string(""),
+          "Push a USER_SCOPE frame, emit a ROCTX range, publish chain into TLS DebugInfo.");
+    m.def("pop_user_scope", &pop_user_scope, "Pop the most recent push_user_scope() frame on this thread.");
+    m.def("dump_stats", &dump_stats, "Internal counters for tests/debugging.");
+    m.def("start_capture", &start_capture, "Begin recording wire strings (test hook).");
+    m.def("stop_capture", &stop_capture, "Stop and return captured wire strings.");
 }

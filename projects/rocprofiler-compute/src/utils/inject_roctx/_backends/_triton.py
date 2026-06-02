@@ -21,6 +21,8 @@ from utils.logger import console_log, console_warning
 
 from . import register
 
+_BACKEND_NAME = "triton"
+
 CompiledKernel: Any = None
 
 
@@ -59,7 +61,7 @@ def patch_triton_launcher() -> None:
             kernel_name = kernel_name.get("name", "<triton_kernel>")
         location = resolve_user_caller_location()
         marker = f"triton.CompiledKernel.{kernel_name}"
-        _push_scope(marker, f"#1@{location}")
+        _push_scope(marker, f"#1@{location}", backend=_BACKEND_NAME)
         try:
             return original_call(self, *args, **kwargs)
         finally:

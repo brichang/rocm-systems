@@ -532,8 +532,14 @@ def process_api_trace_output(
         raise ValueError(
             f"Consolidated API trace is missing required columns {missing_columns}"
         )
-    consolidated_df = consolidated_df[required_columns]
-    if consolidated_df.isnull().values.any():
+    # Backend is injected by utils_profile._augment_marker_csv. It may be
+    # absent in pre-tagging fixtures; default attribution mirrors the parser.
+    has_backend = "Backend" in consolidated_df.columns
+    projection = [*required_columns, "Backend"] if has_backend else required_columns
+    consolidated_df = consolidated_df[projection]
+    if not has_backend:
+        consolidated_df = consolidated_df.assign(Backend="torch")
+    if consolidated_df.drop(columns=["Backend"]).isnull().values.any():
         console_warning("Consolidated API trace contains missing values")
         raise ValueError("Consolidated API trace contains missing values")
     consolidated_df = consolidated_df.sort_values(by=["Function", "Counter_Name"])
@@ -549,6 +555,7 @@ def process_api_trace_output(
         [
             "Operator_Name",
             "Context_Id",
+            "Backend",
             "Kernel_Name",
             "Counter_Name",
             "Counter_Value",

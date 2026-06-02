@@ -18,6 +18,7 @@ from utils.utils_analysis import (
     process_api_trace_output,
     write_api_trace_consolidated_csv,
 )
+from utils.utils_profile import _augment_marker_csv, _parse_function_backend
 
 GUID = "abc-1234-def"
 
@@ -420,3 +421,118 @@ def test_api_trace_output_same_for_rocpd_and_csv():
 
     common.clean_output_dir(True, rocpd_dir)
     common.clean_output_dir(True, csv_dir)
+
+
+# ---- Backend column unpacking in save_api_trace_inputs ----
+
+
+def test_parse_function_backend_untagged_defaults_to_torch():
+    """Pre-tagging workloads and ATen leaves carry no |<backend> suffix."""
+    clean, backend = _parse_function_backend("torch.empty:#1@linear.py:109")
+    assert clean == "torch.empty:#1@linear.py:109"
+    assert backend == "torch"
+
+
+def test_parse_function_backend_tagged_torch_is_stripped():
+    """Tagged single-frame markers expose backend and lose the suffix."""
+    clean, backend = _parse_function_backend(
+        "nn.Module.MyModel.forward:#1@train.py:42|torch"
+    )
+    assert clean == "nn.Module.MyModel.forward:#1@train.py:42"
+    assert backend == "torch"
+
+
+def test_parse_function_backend_tagged_triton_leaf():
+    """Row-level suffix attributes the entire wire to its producing backend."""
+    clean, backend = _parse_function_backend(
+        "torch.compile.fn/triton.CompiledKernel.foo:#1@a.py:1/#1@b.py:2|triton"
+    )
+    assert clean == ("torch.compile.fn/triton.CompiledKernel.foo:#1@a.py:1/#1@b.py:2")
+    assert backend == "triton"
+
+
+def test_parse_function_backend_aten_leaf_defaults_to_torch():
+    """C++ tier auto-emits ATen leaves without a suffix; default is torch."""
+    clean, backend = _parse_function_backend(
+        "nn.Module.X.forward/aten::add:#1@m.py:9/#1@aten:0"
+    )
+    assert clean == "nn.Module.X.forward/aten::add:#1@m.py:9/#1@aten:0"
+    assert backend == "torch"
+
+
+def test_augment_marker_csv_adds_backend_column(tmp_path):
+    """End-to-end: tagged + untagged rows survive copy; Backend is populated."""
+    src = tmp_path / "src_marker_api_trace.csv"
+    dst = tmp_path / "api_trace_dst_marker_api_trace.csv"
+
+    src_df = pd.DataFrame({
+        "Domain": ["MARKER_CORE_RANGE_API"] * 3,
+        "Function": [
+            "nn.Module.X.forward:#1@a.py:1|torch",
+            "triton.CompiledKernel.k:#1@b.py:2|triton",
+            "torch.empty:#1@c.py:3",
+        ],
+        "Correlation_Id": [1, 2, 3],
+        "Start_Timestamp": [100, 200, 300],
+        "End_Timestamp": [150, 250, 350],
+    })
+    src_df.to_csv(src, index=False)
+
+    _augment_marker_csv(str(src), str(dst))
+
+    out_df = pd.read_csv(dst)
+    assert "Backend" in out_df.columns
+    assert out_df["Backend"].tolist() == ["torch", "triton", "torch"]
+    assert out_df["Function"].tolist() == [
+        "nn.Module.X.forward:#1@a.py:1",
+        "triton.CompiledKernel.k:#1@b.py:2",
+        "torch.empty:#1@c.py:3",
+    ]
+    for col in ("Domain", "Correlation_Id", "Start_Timestamp", "End_Timestamp"):
+        assert col in out_df.columns
+
+
+def test_augment_marker_csv_handles_unknown_schema(tmp_path):
+    """A CSV without a Function column copies verbatim instead of corrupting."""
+    src = tmp_path / "src.csv"
+    dst = tmp_path / "dst.csv"
+    src.write_text("Foo,Bar\n1,2\n3,4\n", encoding="utf-8")
+
+    _augment_marker_csv(str(src), str(dst))
+
+    assert dst.read_text(encoding="utf-8") == src.read_text(encoding="utf-8")
+
+
+def test_process_api_trace_output_defaults_backend_for_untagged(tmp_path):
+    """Untagged pre-tagging fixtures get Backend='torch' in the consolidated df."""
+    workload_dir = str(tmp_path)
+    write_rocpd_layout(workload_dir)
+
+    consolidated_df, _ = process_api_trace_output(workload_dir)
+
+    assert "Backend" in consolidated_df.columns
+    assert (consolidated_df["Backend"] == "torch").all()
+
+
+def test_process_api_trace_output_preserves_per_row_backend(tmp_path):
+    """A pre-stripped + tagged CSV (as produced by _augment_marker_csv)
+    surfaces the per-row Backend value into the consolidated dataframe.
+    """
+    workload_dir = str(tmp_path)
+    write_rocpd_layout(workload_dir)
+
+    # Overwrite the fixture with what save_api_trace_inputs would produce:
+    # Function has prefixes stripped, Backend carries per-row attribution.
+    marker_path = Path(workload_dir) / "api_trace_run0_marker_api_trace.csv"
+    df = pd.read_csv(marker_path)
+    df["Backend"] = ["torch", "torch", "triton"]
+    df.to_csv(marker_path, index=False)
+
+    consolidated_df, _ = process_api_trace_output(workload_dir)
+
+    assert "Backend" in consolidated_df.columns
+    backend_by_operator = dict(
+        zip(consolidated_df["Operator_Name"], consolidated_df["Backend"])
+    )
+    assert backend_by_operator.get("torch.mm") == "triton"
+    assert backend_by_operator.get("nn.Module.Linear.forward") == "torch"

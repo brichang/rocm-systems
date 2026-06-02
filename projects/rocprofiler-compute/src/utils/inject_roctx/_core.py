@@ -18,7 +18,7 @@ from typing import Any, Callable, Optional, Protocol
 
 class NativeTierHook(Protocol):
     def active(self) -> bool: ...
-    def push(self, marker: str, context: str) -> bool: ...
+    def push(self, marker: str, context: str, backend: str) -> bool: ...
     def pop(self) -> None: ...
 
 
@@ -102,10 +102,12 @@ def resolve_user_caller_location() -> str:
     return "python.dispatch:0"
 
 
-# Wire format: "<op_path>:#N@file:line/..." split on ":#" by utils_analysis.py.
+# Wire format: "<op_path>:#N@file:line/...[|<backend>]". The "|<backend>"
+# suffix, when present, attributes the push to its producing backend and is
+# unpacked into a Backend column by utils_profile._augment_marker_csv.
 
 
-def _push_scope(marker: str, context: str) -> None:
+def _push_scope(marker: str, context: str, backend: str = "") -> None:
     marker_stack = get_marker_stack()
     context_stack = get_context_stack()
     tier_stack = get_tier_stack()
@@ -114,7 +116,7 @@ def _push_scope(marker: str, context: str) -> None:
     hook = _native_tier_hook
     if hook is not None and hook.active():
         try:
-            used_native = bool(hook.push(marker, context))
+            used_native = bool(hook.push(marker, context, backend))
         except Exception:
             used_native = False
 
@@ -125,6 +127,8 @@ def _push_scope(marker: str, context: str) -> None:
             + ":"
             + "/".join([*context_stack, context])
         )
+        if backend:
+            full = f"{full}|{backend}"
         _range_push(full)
 
     # Bookkeeping after the push. If a stack append raises mid-sequence,
@@ -176,8 +180,12 @@ def _pop_scope() -> None:
 def roctx_wrapper(
     func: Callable[..., Any],
     name: Optional[str] = None,
+    backend: str = "",
 ) -> Callable[..., Any]:
-    """Wrap func with a ROCTX range. Idempotent via _roctx_wrapped."""
+    """Wrap func with a ROCTX range. Idempotent via _roctx_wrapped.
+
+    backend, when set, attributes each emitted row to its producing backend.
+    """
     if getattr(func, "_roctx_wrapped", False):
         return func
     func_name = name or func.__name__
@@ -187,7 +195,7 @@ def roctx_wrapper(
     def wrapper(*args: Any, **kwargs: Any) -> object:
         call_counter["count"] += 1
         location = resolve_user_caller_location()
-        _push_scope(func_name, f"#{call_counter['count']}@{location}")
+        _push_scope(func_name, f"#{call_counter['count']}@{location}", backend=backend)
         try:
             return func(*args, **kwargs)
         finally:
@@ -197,7 +205,7 @@ def roctx_wrapper(
     return wrapper
 
 
-def _marker_only_init_wrapper(name: str) -> Callable[..., Any]:
+def _marker_only_init_wrapper(name: str, backend: str = "") -> Callable[..., Any]:
     """__init__ that emits a ROCTX range, then calls object.__init__(self).
 
     For classes whose real construction lives in __new__ (cuda.Event/Stream),
@@ -208,7 +216,7 @@ def _marker_only_init_wrapper(name: str) -> Callable[..., Any]:
     def marker_only_init(self: object, *args: Any, **kwargs: Any) -> None:
         call_counter["count"] += 1
         location = resolve_user_caller_location()
-        _push_scope(name, f"#{call_counter['count']}@{location}")
+        _push_scope(name, f"#{call_counter['count']}@{location}", backend=backend)
         try:
             return object.__init__(self)
         finally:

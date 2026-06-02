@@ -38,6 +38,8 @@ from utils.logger import console_log, console_warning
 
 from . import register
 
+_BACKEND_NAME = "torch"
+
 # Module-level handles populated by TorchBackend.install().
 torch: Any = None
 dist: Any = None
@@ -140,9 +142,9 @@ class _RecordFnHook:
     def active(self) -> bool:
         return _USING_C_TIER and _roctx_recordfn is not None
 
-    def push(self, marker: str, context: str) -> bool:
+    def push(self, marker: str, context: str, backend: str) -> bool:
         try:
-            _roctx_recordfn.push_user_scope(marker, context)
+            _roctx_recordfn.push_user_scope(marker, context, backend)
             return True
         except Exception:
             return False
@@ -246,7 +248,13 @@ def patch_distributed_collectives() -> None:
         if getattr(fn, "_roctx_wrapped", False):
             continue
         try:
-            setattr(dist, fn_name, roctx_wrapper(fn, f"torch.distributed.{fn_name}"))
+            setattr(
+                dist,
+                fn_name,
+                roctx_wrapper(
+                    fn, f"torch.distributed.{fn_name}", backend=_BACKEND_NAME
+                ),
+            )
             wrapped.append(fn_name)
         except Exception as exc:
             console_warning(
@@ -271,7 +279,9 @@ def patch_distributed_collectives() -> None:
                     fc,
                     fn_name,
                     roctx_wrapper(
-                        fn, f"torch.distributed._functional_collectives.{fn_name}"
+                        fn,
+                        f"torch.distributed._functional_collectives.{fn_name}",
+                        backend=_BACKEND_NAME,
                     ),
                 )
                 wrapped.append(f"_functional_collectives.{fn_name}")
@@ -311,7 +321,7 @@ def patch_process_group_methods() -> None:
                 continue
             try:
                 marker = f"ProcessGroup.{cls.__name__}.{method_name}"
-                wrapped = roctx_wrapper(fn, marker)
+                wrapped = roctx_wrapper(fn, marker, backend=_BACKEND_NAME)
                 setattr(cls, method_name, wrapped)
                 wrapped_method_count["count"] += 1
             except Exception as exc:
@@ -384,7 +394,7 @@ def patch_cuda_graph() -> None:
             continue
         try:
             marker = f"torch.cuda.CUDAGraph.{method_name}"
-            wrapped = roctx_wrapper(fn, marker)
+            wrapped = roctx_wrapper(fn, marker, backend=_BACKEND_NAME)
             setattr(cls, method_name, wrapped)
             wrapped_methods.append(method_name)
         except Exception as exc:
@@ -416,7 +426,7 @@ def patch_compile_callable() -> None:
         **kwargs: Any,
     ) -> object:
         location = resolve_user_caller_location()
-        _push_scope("torch.compile", f"#1@{location}")
+        _push_scope("torch.compile", f"#1@{location}", backend=_BACKEND_NAME)
         try:
             compiled = original_compile(model_or_fn, *args, **kwargs)
         finally:
@@ -430,7 +440,7 @@ def patch_compile_callable() -> None:
         @wraps(compiled)
         def invocation_wrapper(*c_args: Any, **c_kwargs: Any) -> object:
             loc = resolve_user_caller_location()
-            _push_scope(f"torch.compile.{fn_label}", f"#1@{loc}")
+            _push_scope(f"torch.compile.{fn_label}", f"#1@{loc}", backend=_BACKEND_NAME)
             try:
                 return compiled(*c_args, **c_kwargs)
             finally:
@@ -533,10 +543,13 @@ def install_dispatcher_hook() -> str:
         location = resolve_user_caller_location()
         marker_stack = get_marker_stack()
         context_stack = get_context_stack()
+        # Bypasses _push_scope; mirror its wire-format suffix so dispatcher
+        # rows carry the same Backend attribution as roctx_wrapper rows.
         full_marker = (
             "/".join([*marker_stack, op_name])
             + ":"
             + "/".join([*context_stack, f"#{idx}@{location}"])
+            + f"|{_BACKEND_NAME}"
         )
         rangePush(full_marker)
         marker_stack.append(op_name)
@@ -608,7 +621,11 @@ def install_tensor_backward_wrapper() -> None:
     ) -> object:
         backward_counter["count"] += 1
         location = resolve_user_caller_location()
-        _push_scope("torch.Tensor.backward", f"#{backward_counter['count']}@{location}")
+        _push_scope(
+            "torch.Tensor.backward",
+            f"#{backward_counter['count']}@{location}",
+            backend=_BACKEND_NAME,
+        )
         try:
             return original_backward(self, *args, **kwargs)
         finally:
@@ -688,6 +705,7 @@ def inject_roctx_into_optimizer() -> None:
             _push_scope(
                 f"optimizer.{type(self).__name__}.step",
                 f"#{self._roctx_step_call_count}@{location}",
+                backend=_BACKEND_NAME,
             )
             try:
                 return original_step(self, *args, **kwargs)
@@ -716,7 +734,7 @@ def wrap_module_function(
         return False
     if getattr(fn, "_roctx_wrapped", False):
         return True
-    wrapped = roctx_wrapper(fn, marker_name)
+    wrapped = roctx_wrapper(fn, marker_name, backend=_BACKEND_NAME)
     try:
         setattr(module, attr_name, wrapped)
     except Exception as exc:
@@ -820,7 +838,11 @@ def install_function_apply_wrappers() -> bool:
 
         def wrapped_apply(*args: Any, **kwargs: Any) -> object:
             location = resolve_user_caller_location()
-            _push_scope("torch.autograd.Function.apply", f"#1@{location}")
+            _push_scope(
+                "torch.autograd.Function.apply",
+                f"#1@{location}",
+                backend=_BACKEND_NAME,
+            )
             try:
                 return base_apply(*args, **kwargs)
             finally:
@@ -886,7 +908,9 @@ def install_tensor_method_wrappers() -> None:
         if getattr(fn, "_roctx_wrapped", False):
             continue
         try:
-            wrapped_fn = roctx_wrapper(fn, f"torch.Tensor.{method_name}")
+            wrapped_fn = roctx_wrapper(
+                fn, f"torch.Tensor.{method_name}", backend=_BACKEND_NAME
+            )
             setattr(torch.Tensor, method_name, wrapped_fn)
             wrapped.append(method_name)
         except (TypeError, AttributeError) as exc:
@@ -929,9 +953,13 @@ def install_extra_structural_wrappers() -> None:
                 # cuda.{Event,Stream} consume ctor kwargs in __new__;
                 # __init__ is inherited from object and rejects forwarded args.
                 if init is object.__init__:
-                    cls.__init__ = _marker_only_init_wrapper(f"torch.cuda.{cls_name}")
+                    cls.__init__ = _marker_only_init_wrapper(
+                        f"torch.cuda.{cls_name}", backend=_BACKEND_NAME
+                    )
                 else:
-                    wrapped_init = roctx_wrapper(init, f"torch.cuda.{cls_name}")
+                    wrapped_init = roctx_wrapper(
+                        init, f"torch.cuda.{cls_name}", backend=_BACKEND_NAME
+                    )
                     cls.__init__ = wrapped_init
                 wrapped.append(f"torch.cuda.{cls_name}")
             except Exception as exc:
@@ -975,6 +1003,7 @@ def inject_roctx_into_model() -> None:
         _push_scope(
             f"nn.Module.{class_name}.forward",
             f"#{self._roctx_call_count}@{location}",
+            backend=_BACKEND_NAME,
         )
         try:
             return original_call(self, *args, **kwargs)
