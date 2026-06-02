@@ -1172,6 +1172,31 @@ std::optional<size_t> find_vop3_sdst_for_test(std::span<const uint32_t> words, u
   return std::nullopt;
 }
 
+std::optional<size_t> find_vop3_for_test(std::span<const uint32_t> words, uint16_t op,
+                                         uint8_t vdst, uint16_t src0, uint16_t src1,
+                                         std::optional<uint16_t> src2 = std::nullopt) {
+  for (size_t i = 0; i + 1 < words.size(); ++i) {
+    rdna4::Vop3MachineInst decoded{};
+    std::memcpy(&decoded, words.data() + i, sizeof(decoded));
+    if (decoded.encoding == 0x35u && decoded.op == op && decoded.vdst == vdst &&
+        decoded.src0 == src0 && decoded.src1 == src1 && (!src2 || decoded.src2 == *src2))
+      return i;
+  }
+  return std::nullopt;
+}
+
+std::optional<size_t> find_vop2_for_test(std::span<const uint32_t> words, uint8_t op,
+                                         std::optional<uint8_t> vdst, uint16_t src0,
+                                         uint8_t vsrc1) {
+  for (size_t i = 0; i < words.size(); ++i) {
+    const auto decoded = std::bit_cast<rdna4::Vop2MachineInst>(words[i]);
+    if (decoded.op == op && (!vdst || decoded.vdst == *vdst) && decoded.src0 == src0 &&
+        decoded.vsrc1 == vsrc1)
+      return i;
+  }
+  return std::nullopt;
+}
+
 void expect_sub_u64_carry_chain(const CodeObject &translated, uint8_t vdst, uint16_t src0,
                                 uint16_t src1) {
   const Section *translations = find_section(translated, ".rj_translations");
@@ -3294,6 +3319,112 @@ TEST(BinaryTranslator, Gfx1250DescriptorConfigRewritePreservesLaterScalarZeroVop
             all_words.end())
       << "later ordinary scalar-zero reuse must not observe the descriptor config literal";
   EXPECT_EQ(std::ranges::find(all_words, build_vop1(1, 9, 11)), all_words.end());
+}
+
+TEST(BinaryTranslator, Gfx1250DescriptorWord2RewritePreservesLaterExecMaskZero) {
+  constexpr uint32_t kGfx1250SEndpgm = 0xBFB00000u;
+  constexpr uint8_t kSAndNot1B32 = 34;
+  constexpr uint8_t kVccLo = 106;
+  constexpr uint8_t kExecLo = 126;
+  constexpr std::array<uint32_t, 3> kBufferLoadB128S0 = {0xC405C07Cu, 0x00800000u, 0};
+
+  const std::array<uint32_t, 6> text_words = {
+      pack_sop1(0, 2, scalar_positive_inline_u32(0)),
+      kBufferLoadB128S0[0],
+      kBufferLoadB128S0[1],
+      kBufferLoadB128S0[2],
+      pack_sop2(kSAndNot1B32, kVccLo, kExecLo, 2),
+      kGfx1250SEndpgm,
+  };
+
+  auto image =
+      make_minimal_amdgpu_elf_with_descriptor_and_text(text_words, EF_AMDGPU_MACH_AMDGCN_GFX1250);
+  AmdGpuCodeObject co(image.data(), image.size());
+  ASSERT_TRUE(co.is_valid());
+
+  BinaryTranslator translator(ROCJITSU_CODE_ARCH_GFX1250, ROCJITSU_CODE_ARCH_RDNA4,
+                              EF_AMDGPU_MACH_AMDGCN_GFX1201);
+  auto result = translator.translate(co);
+  ASSERT_FALSE(result.elf_bytes.empty());
+  EXPECT_TRUE(result.warnings.empty());
+
+  AmdGpuCodeObject translated(result.elf_bytes.data(), result.elf_bytes.size());
+  ASSERT_TRUE(translated.is_valid());
+  std::vector<uint32_t> all_words;
+  if (const Section *translations = find_section(translated, ".rj_translations")) {
+    all_words.resize(translations->size() / sizeof(uint32_t));
+    std::memcpy(all_words.data(), translations->data(), translations->size());
+  }
+  ASSERT_FALSE(translated.text_sections().empty());
+  const auto *text = translated.text_sections()[0];
+  const size_t old_size = all_words.size();
+  all_words.resize(old_size + text->size() / sizeof(uint32_t));
+  std::memcpy(all_words.data() + old_size, text->data(), text->size());
+
+  const auto has_word_pair = [&](uint32_t w0, uint32_t w1) {
+    for (size_t i = 0; i + 1 < all_words.size(); ++i) {
+      if (all_words[i] == w0 && all_words[i + 1] == w1)
+        return true;
+    }
+    return false;
+  };
+
+  EXPECT_TRUE(has_word_pair(pack_sop1(0, 2, 255), 0xFFFFFFFFu))
+      << "the buffer load still needs an unbounded RDNA4 descriptor range";
+  EXPECT_NE(std::ranges::find(all_words,
+                              pack_sop2(kSAndNot1B32, kVccLo, kExecLo,
+                                         scalar_positive_inline_u32(0))),
+            all_words.end())
+      << "later ordinary exec-mask use must not observe the descriptor range literal";
+  EXPECT_EQ(std::ranges::find(all_words, pack_sop2(kSAndNot1B32, kVccLo, kExecLo, 2)),
+            all_words.end());
+}
+
+TEST(BinaryTranslator, Gfx1250ScalarZeroMaskWithoutDescriptorUseStaysSgpr) {
+  constexpr uint32_t kGfx1250SEndpgm = 0xBFB00000u;
+  constexpr uint8_t kSAndNot1B32 = 34;
+  constexpr uint8_t kSCbranchVccz = 35;
+  constexpr uint8_t kVccLo = 106;
+  constexpr uint8_t kExecLo = 126;
+
+  const std::array<uint32_t, 4> text_words = {
+      pack_sop1(0, 2, scalar_positive_inline_u32(0)),
+      pack_sop2(kSAndNot1B32, kVccLo, kExecLo, 2),
+      pack_sopp(kSCbranchVccz, 1),
+      kGfx1250SEndpgm,
+  };
+
+  auto image =
+      make_minimal_amdgpu_elf_with_descriptor_and_text(text_words, EF_AMDGPU_MACH_AMDGCN_GFX1250);
+  AmdGpuCodeObject co(image.data(), image.size());
+  ASSERT_TRUE(co.is_valid());
+
+  BinaryTranslator translator(ROCJITSU_CODE_ARCH_GFX1250, ROCJITSU_CODE_ARCH_RDNA4,
+                              EF_AMDGPU_MACH_AMDGCN_GFX1201);
+  auto result = translator.translate(co);
+  ASSERT_FALSE(result.elf_bytes.empty());
+  EXPECT_TRUE(result.warnings.empty());
+
+  AmdGpuCodeObject translated(result.elf_bytes.data(), result.elf_bytes.size());
+  ASSERT_TRUE(translated.is_valid());
+  std::vector<uint32_t> all_words;
+  if (const Section *translations = find_section(translated, ".rj_translations")) {
+    all_words.resize(translations->size() / sizeof(uint32_t));
+    std::memcpy(all_words.data(), translations->data(), translations->size());
+  }
+  ASSERT_FALSE(translated.text_sections().empty());
+  const auto *text = translated.text_sections()[0];
+  const size_t old_size = all_words.size();
+  all_words.resize(old_size + text->size() / sizeof(uint32_t));
+  std::memcpy(all_words.data() + old_size, text->data(), text->size());
+
+  EXPECT_NE(std::ranges::find(all_words, pack_sop2(kSAndNot1B32, kVccLo, kExecLo, 2)),
+            all_words.end())
+      << "plain scalar-zero mask uses must not be mistaken for descriptor promotion";
+  EXPECT_EQ(std::ranges::find(all_words,
+                              pack_sop2(kSAndNot1B32, kVccLo, kExecLo,
+                                         scalar_positive_inline_u32(0))),
+            all_words.end());
 }
 
 TEST(BinaryTranslator, Gfx1250VbufferB32OpcodesSurviveRdna4Encoding) {
@@ -6094,12 +6225,13 @@ TEST(BinaryTranslator, Gfx1250VPkAddF32LowersToTwoVAddF32s) {
   ASSERT_TRUE(translated.is_valid());
   const Section *translations = find_section(translated, ".rj_translations");
   ASSERT_NE(translations, nullptr);
-  ASSERT_EQ(translations->size(), 5u * sizeof(uint32_t));
-  std::array<uint32_t, 5> cave_words{};
-  std::memcpy(cave_words.data(), translations->data(), translations->size());
+  const auto cave_words = section_words_for_test(*translations);
+  const auto base = find_vop3_for_test(cave_words, 259u, 42u, 256u + 30u, 256u + 34u);
+  ASSERT_TRUE(base.has_value());
+  ASSERT_LE(*base + 5u, cave_words.size());
 
   rdna4::Vop3MachineInst add_lo{};
-  std::memcpy(&add_lo, cave_words.data(), sizeof(add_lo));
+  std::memcpy(&add_lo, cave_words.data() + *base, sizeof(add_lo));
   EXPECT_EQ(add_lo.encoding, 0x35u);
   EXPECT_EQ(add_lo.op, 259u);
   EXPECT_EQ(add_lo.vdst, 42u);
@@ -6109,7 +6241,7 @@ TEST(BinaryTranslator, Gfx1250VPkAddF32LowersToTwoVAddF32s) {
   EXPECT_EQ(add_lo.neg, 0u);
 
   rdna4::Vop3MachineInst add_hi{};
-  std::memcpy(&add_hi, cave_words.data() + 2, sizeof(add_hi));
+  std::memcpy(&add_hi, cave_words.data() + *base + 2, sizeof(add_hi));
   EXPECT_EQ(add_hi.encoding, 0x35u);
   EXPECT_EQ(add_hi.op, 259u);
   EXPECT_EQ(add_hi.vdst, 43u);
@@ -6117,7 +6249,185 @@ TEST(BinaryTranslator, Gfx1250VPkAddF32LowersToTwoVAddF32s) {
   EXPECT_EQ(add_hi.src1, 256u + 35u);
   EXPECT_EQ(add_hi.clamp, 0u);
   EXPECT_EQ(add_hi.neg, 0u);
-  EXPECT_EQ((cave_words[4] >> 16) & 0x7Fu, sopp_op_branch(ROCJITSU_CODE_ARCH_RDNA4));
+  EXPECT_EQ((cave_words[*base + 4u] >> 16) & 0x7Fu, sopp_op_branch(ROCJITSU_CODE_ARCH_RDNA4));
+}
+
+TEST(BinaryTranslator, Gfx1250VPkMulF32LowersToTwoVMulF32s) {
+  constexpr uint32_t kGfx1250SEndpgm = 0xBFB00000u;
+  gfx1250::Vop3pMachineInst inst{};
+  inst.vdst = 44;
+  inst.op = 40;
+  inst.encoding = 0xCC;
+  inst.src0 = 256 + 12;
+  inst.src1 = 256 + 20;
+  inst.src2 = scalar_positive_inline_u32(0);
+  inst.opsel = 0x2;
+  inst.opsel_hi = 0x1;
+  inst.neg = 0x2;
+  inst.neg_hi = 0x1;
+
+  std::array<uint32_t, 3> text_words{};
+  std::memcpy(text_words.data(), &inst, sizeof(inst));
+  text_words[2] = kGfx1250SEndpgm;
+
+  auto image =
+      make_minimal_amdgpu_elf_with_descriptor_and_text(text_words, EF_AMDGPU_MACH_AMDGCN_GFX1250);
+  AmdGpuCodeObject co(image.data(), image.size());
+  ASSERT_TRUE(co.is_valid());
+
+  BinaryTranslator translator(ROCJITSU_CODE_ARCH_GFX1250, ROCJITSU_CODE_ARCH_RDNA4,
+                              EF_AMDGPU_MACH_AMDGCN_GFX1201);
+  auto result = translator.translate(co);
+  ASSERT_FALSE(result.elf_bytes.empty());
+  EXPECT_TRUE(result.warnings.empty());
+
+  AmdGpuCodeObject translated(result.elf_bytes.data(), result.elf_bytes.size());
+  ASSERT_TRUE(translated.is_valid());
+  const Section *translations = find_section(translated, ".rj_translations");
+  ASSERT_NE(translations, nullptr);
+  const auto cave_words = section_words_for_test(*translations);
+  const auto base = find_vop3_for_test(cave_words, 264u, 44u, 256u + 12u, 256u + 21u);
+  ASSERT_TRUE(base.has_value());
+  ASSERT_LE(*base + 5u, cave_words.size());
+
+  rdna4::Vop3MachineInst mul_lo{};
+  std::memcpy(&mul_lo, cave_words.data() + *base, sizeof(mul_lo));
+  EXPECT_EQ(mul_lo.encoding, 0x35u);
+  EXPECT_EQ(mul_lo.op, 264u);
+  EXPECT_EQ(mul_lo.vdst, 44u);
+  EXPECT_EQ(mul_lo.src0, 256u + 12u);
+  EXPECT_EQ(mul_lo.src1, 256u + 21u);
+  EXPECT_EQ(mul_lo.neg, 0x2u);
+
+  rdna4::Vop3MachineInst mul_hi{};
+  std::memcpy(&mul_hi, cave_words.data() + *base + 2, sizeof(mul_hi));
+  EXPECT_EQ(mul_hi.encoding, 0x35u);
+  EXPECT_EQ(mul_hi.op, 264u);
+  EXPECT_EQ(mul_hi.vdst, 45u);
+  EXPECT_EQ(mul_hi.src0, 256u + 13u);
+  EXPECT_EQ(mul_hi.src1, 256u + 20u);
+  EXPECT_EQ(mul_hi.neg, 0x1u);
+  EXPECT_EQ((cave_words[*base + 4u] >> 16) & 0x7Fu, sopp_op_branch(ROCJITSU_CODE_ARCH_RDNA4));
+}
+
+TEST(BinaryTranslator, Gfx1250VPkFmaF32LowersToTwoVFmaF32s) {
+  constexpr uint32_t kGfx1250SEndpgm = 0xBFB00000u;
+  gfx1250::Vop3pMachineInst inst{};
+  inst.vdst = 46;
+  inst.op = 31;
+  inst.encoding = 0xCC;
+  inst.src0 = 256 + 10;
+  inst.src1 = 256 + 20;
+  inst.src2 = 256 + 30;
+  inst.opsel = 0x4;
+  inst.opsel_hi = 0x3;
+  inst.pad_14 = 1;
+  inst.clamp = 1;
+  inst.neg = 0x5;
+  inst.neg_hi = 0x6;
+
+  std::array<uint32_t, 3> text_words{};
+  std::memcpy(text_words.data(), &inst, sizeof(inst));
+  text_words[2] = kGfx1250SEndpgm;
+
+  auto image =
+      make_minimal_amdgpu_elf_with_descriptor_and_text(text_words, EF_AMDGPU_MACH_AMDGCN_GFX1250);
+  AmdGpuCodeObject co(image.data(), image.size());
+  ASSERT_TRUE(co.is_valid());
+
+  BinaryTranslator translator(ROCJITSU_CODE_ARCH_GFX1250, ROCJITSU_CODE_ARCH_RDNA4,
+                              EF_AMDGPU_MACH_AMDGCN_GFX1201);
+  auto result = translator.translate(co);
+  ASSERT_FALSE(result.elf_bytes.empty());
+  EXPECT_TRUE(result.warnings.empty());
+
+  AmdGpuCodeObject translated(result.elf_bytes.data(), result.elf_bytes.size());
+  ASSERT_TRUE(translated.is_valid());
+  const Section *translations = find_section(translated, ".rj_translations");
+  ASSERT_NE(translations, nullptr);
+  const auto cave_words = section_words_for_test(*translations);
+  const auto base =
+      find_vop3_for_test(cave_words, 531u, 46u, 256u + 10u, 256u + 20u, 256u + 31u);
+  ASSERT_TRUE(base.has_value());
+  ASSERT_LE(*base + 5u, cave_words.size());
+
+  rdna4::Vop3MachineInst fma_lo{};
+  std::memcpy(&fma_lo, cave_words.data() + *base, sizeof(fma_lo));
+  EXPECT_EQ(fma_lo.encoding, 0x35u);
+  EXPECT_EQ(fma_lo.op, 531u);
+  EXPECT_EQ(fma_lo.vdst, 46u);
+  EXPECT_EQ(fma_lo.src0, 256u + 10u);
+  EXPECT_EQ(fma_lo.src1, 256u + 20u);
+  EXPECT_EQ(fma_lo.src2, 256u + 31u);
+  EXPECT_EQ(fma_lo.clamp, 1u);
+  EXPECT_EQ(fma_lo.neg, 0x5u);
+
+  rdna4::Vop3MachineInst fma_hi{};
+  std::memcpy(&fma_hi, cave_words.data() + *base + 2, sizeof(fma_hi));
+  EXPECT_EQ(fma_hi.encoding, 0x35u);
+  EXPECT_EQ(fma_hi.op, 531u);
+  EXPECT_EQ(fma_hi.vdst, 47u);
+  EXPECT_EQ(fma_hi.src0, 256u + 11u);
+  EXPECT_EQ(fma_hi.src1, 256u + 21u);
+  EXPECT_EQ(fma_hi.src2, 256u + 31u);
+  EXPECT_EQ(fma_hi.clamp, 1u);
+  EXPECT_EQ(fma_hi.neg, 0x6u);
+  EXPECT_EQ((cave_words[*base + 4u] >> 16) & 0x7Fu, sopp_op_branch(ROCJITSU_CODE_ARCH_RDNA4));
+}
+
+TEST(BinaryTranslator, Gfx1250VPkFmaF32StagesHighLaneReadOfOldDstLow) {
+  constexpr uint32_t kGfx1250SEndpgm = 0xBFB00000u;
+  gfx1250::Vop3pMachineInst inst{};
+  inst.vdst = 2;
+  inst.op = 31;
+  inst.encoding = 0xCC;
+  inst.src0 = 256 + 16;
+  inst.src1 = 256;
+  inst.src2 = 256 + 2;
+  inst.opsel_hi = 0x1;
+
+  std::array<uint32_t, 3> text_words{};
+  std::memcpy(text_words.data(), &inst, sizeof(inst));
+  text_words[2] = kGfx1250SEndpgm;
+
+  auto image =
+      make_minimal_amdgpu_elf_with_descriptor_and_text(text_words, EF_AMDGPU_MACH_AMDGCN_GFX1250);
+  AmdGpuCodeObject co(image.data(), image.size());
+  ASSERT_TRUE(co.is_valid());
+
+  BinaryTranslator translator(ROCJITSU_CODE_ARCH_GFX1250, ROCJITSU_CODE_ARCH_RDNA4,
+                              EF_AMDGPU_MACH_AMDGCN_GFX1201);
+  auto result = translator.translate(co);
+  ASSERT_FALSE(result.elf_bytes.empty());
+  EXPECT_TRUE(result.warnings.empty());
+
+  AmdGpuCodeObject translated(result.elf_bytes.data(), result.elf_bytes.size());
+  ASSERT_TRUE(translated.is_valid());
+  const Section *translations = find_section(translated, ".rj_translations");
+  ASSERT_NE(translations, nullptr);
+  const auto cave_words = section_words_for_test(*translations);
+  const auto base = find_vop3_for_test(cave_words, 531u, 2u, 256u + 16u, 256u, 256u + 2u);
+  ASSERT_TRUE(base.has_value());
+  ASSERT_GE(*base, 2u);
+  ASSERT_LE(*base + 5u, cave_words.size());
+
+  const auto stage = std::bit_cast<rdna4::Vop1MachineInst>(cave_words[*base - 2u]);
+  ASSERT_EQ(stage.op, 1u);
+  EXPECT_NE(stage.vdst, 2u);
+  EXPECT_NE(stage.vdst, 3u);
+  EXPECT_EQ(stage.src0, 256u + 2u);
+  EXPECT_EQ(cave_words[*base - 1u],
+            build_s_wait_alu(kWaitAluDepctrVaVdst0, ROCJITSU_CODE_ARCH_RDNA4));
+
+  rdna4::Vop3MachineInst fma_hi{};
+  std::memcpy(&fma_hi, cave_words.data() + *base + 2, sizeof(fma_hi));
+  EXPECT_EQ(fma_hi.encoding, 0x35u);
+  EXPECT_EQ(fma_hi.op, 531u);
+  EXPECT_EQ(fma_hi.vdst, 3u);
+  EXPECT_EQ(fma_hi.src0, 256u + 17u);
+  EXPECT_EQ(fma_hi.src1, 256u);
+  EXPECT_EQ(fma_hi.src2, 256u + stage.vdst);
+  EXPECT_EQ((cave_words[*base + 4u] >> 16) & 0x7Fu, sopp_op_branch(ROCJITSU_CODE_ARCH_RDNA4));
 }
 
 TEST(BinaryTranslator, Gfx1250WmmaF32F16K32SplitsThroughRelayoutCave) {
@@ -7162,9 +7472,14 @@ TEST(BinaryTranslator, Gfx1250VBitop3B16EcHighDstLowersThroughB32MaskMerge) {
   ASSERT_TRUE(translated.is_valid());
   const Section *translations = find_section(translated, ".rj_translations");
   ASSERT_NE(translations, nullptr);
-  ASSERT_EQ(translations->size(), 13u * sizeof(uint32_t));
+  const auto translation_words = section_words_for_test(*translations);
+  const auto base =
+      find_vop2_for_test(translation_words, 25u, std::nullopt, scalar_positive_inline_u32(16), 5u);
+  ASSERT_TRUE(base.has_value());
+  ASSERT_LE(*base + 13u, translation_words.size());
   std::array<uint32_t, 13> cave_words{};
-  std::memcpy(cave_words.data(), translations->data(), translations->size());
+  std::copy_n(translation_words.begin() + static_cast<std::ptrdiff_t>(*base), cave_words.size(),
+              cave_words.begin());
 
   const auto src0_hi = std::bit_cast<rdna4::Vop2MachineInst>(cave_words[0]);
   ASSERT_EQ(src0_hi.op, 25u);
@@ -7261,9 +7576,14 @@ TEST(BinaryTranslator, Gfx1250VBitop3B16F8LowDstLowersThroughB32MaskMerge) {
   ASSERT_TRUE(translated.is_valid());
   const Section *translations = find_section(translated, ".rj_translations");
   ASSERT_NE(translations, nullptr);
-  ASSERT_EQ(translations->size(), 12u * sizeof(uint32_t));
+  const auto translation_words = section_words_for_test(*translations);
+  const auto base =
+      find_vop2_for_test(translation_words, 28u, std::nullopt, scalar_positive_inline_u32(0), 4u);
+  ASSERT_TRUE(base.has_value());
+  ASSERT_LE(*base + 12u, translation_words.size());
   std::array<uint32_t, 12> cave_words{};
-  std::memcpy(cave_words.data(), translations->data(), translations->size());
+  std::copy_n(translation_words.begin() + static_cast<std::ptrdiff_t>(*base), cave_words.size(),
+              cave_words.begin());
 
   const auto src0_lo = std::bit_cast<rdna4::Vop2MachineInst>(cave_words[0]);
   ASSERT_EQ(src0_lo.op, 28u);
@@ -7318,6 +7638,111 @@ TEST(BinaryTranslator, Gfx1250VBitop3B16F8LowDstLowersThroughB32MaskMerge) {
   EXPECT_EQ(merge_dst.src0, 256u + result_tmp);
   EXPECT_EQ(merge_dst.vsrc1, 6u);
   EXPECT_EQ((cave_words[11] >> 16) & 0x7Fu, sopp_op_branch(ROCJITSU_CODE_ARCH_RDNA4));
+}
+
+TEST(BinaryTranslator, Gfx1250VBitop3B16FeHighDstLowersThroughB32OrMerge) {
+  constexpr uint32_t kGfx1250SEndpgm = 0xBFB00000u;
+  constexpr uint32_t kLiteral = 0x00000F0Eu;
+  gfx1250::Vop3MachineInst inst{};
+  inst.vdst = 3;
+  inst.op = 563;
+  inst.encoding = 0x35;
+  inst.src0 = 256;
+  inst.src1 = 255;
+  inst.src2 = 256 + 4;
+  inst.opsel = 0x8; // src0.l, src1.l, src2.l, vdst.h.
+  inst.abs = 7;
+  inst.omod = 3;
+  inst.neg = 6;
+
+  std::array<uint32_t, 4> text_words{};
+  std::memcpy(text_words.data(), &inst, sizeof(inst));
+  text_words[2] = kLiteral;
+  text_words[3] = kGfx1250SEndpgm;
+
+  auto image =
+      make_minimal_amdgpu_elf_with_descriptor_and_text(text_words, EF_AMDGPU_MACH_AMDGCN_GFX1250);
+  AmdGpuCodeObject co(image.data(), image.size());
+  ASSERT_TRUE(co.is_valid());
+
+  BinaryTranslator translator(ROCJITSU_CODE_ARCH_GFX1250, ROCJITSU_CODE_ARCH_RDNA4,
+                              EF_AMDGPU_MACH_AMDGCN_GFX1201);
+  auto result = translator.translate(co);
+  ASSERT_FALSE(result.elf_bytes.empty());
+  EXPECT_TRUE(result.warnings.empty());
+
+  AmdGpuCodeObject translated(result.elf_bytes.data(), result.elf_bytes.size());
+  ASSERT_TRUE(translated.is_valid());
+  const Section *translations = find_section(translated, ".rj_translations");
+  ASSERT_NE(translations, nullptr);
+  const auto translation_words = section_words_for_test(*translations);
+  const auto base =
+      find_vop2_for_test(translation_words, 28u, std::nullopt, scalar_positive_inline_u32(0), 0u);
+  ASSERT_TRUE(base.has_value());
+  ASSERT_LE(*base + 13u, translation_words.size());
+  std::array<uint32_t, 13> cave_words{};
+  std::copy_n(translation_words.begin() + static_cast<std::ptrdiff_t>(*base), cave_words.size(),
+              cave_words.begin());
+
+  const auto src0_lo = std::bit_cast<rdna4::Vop2MachineInst>(cave_words[0]);
+  ASSERT_EQ(src0_lo.op, 28u);
+  const uint8_t tmp0 = static_cast<uint8_t>(src0_lo.vdst);
+  const uint8_t tmp1 = static_cast<uint8_t>(tmp0 + 1u);
+  const uint8_t tmp2 = static_cast<uint8_t>(tmp0 + 2u);
+  const uint8_t result_tmp = static_cast<uint8_t>(tmp0 + 3u);
+  EXPECT_EQ(src0_lo.src0, scalar_positive_inline_u32(0));
+  EXPECT_EQ(src0_lo.vsrc1, 0u);
+
+  const auto src1_lit = std::bit_cast<rdna4::Vop1MachineInst>(cave_words[1]);
+  EXPECT_EQ(src1_lit.op, 1u);
+  EXPECT_EQ(src1_lit.vdst, tmp1);
+  EXPECT_EQ(src1_lit.src0, 255u);
+  EXPECT_EQ(cave_words[2], kLiteral);
+
+  const auto src2_lo = std::bit_cast<rdna4::Vop2MachineInst>(cave_words[3]);
+  EXPECT_EQ(src2_lo.op, 28u);
+  EXPECT_EQ(src2_lo.vdst, tmp2);
+  EXPECT_EQ(src2_lo.src0, scalar_positive_inline_u32(0));
+  EXPECT_EQ(src2_lo.vsrc1, 4u);
+
+  const auto or_src01 = std::bit_cast<rdna4::Vop2MachineInst>(cave_words[4]);
+  EXPECT_EQ(or_src01.op, 28u);
+  EXPECT_EQ(or_src01.vdst, result_tmp);
+  EXPECT_EQ(or_src01.src0, 256u + tmp0);
+  EXPECT_EQ(or_src01.vsrc1, tmp1);
+
+  const auto or_src2 = std::bit_cast<rdna4::Vop2MachineInst>(cave_words[5]);
+  EXPECT_EQ(or_src2.op, 28u);
+  EXPECT_EQ(or_src2.vdst, result_tmp);
+  EXPECT_EQ(or_src2.src0, 256u + tmp2);
+  EXPECT_EQ(or_src2.vsrc1, result_tmp);
+
+  const auto mask_result = std::bit_cast<rdna4::Vop2MachineInst>(cave_words[6]);
+  EXPECT_EQ(mask_result.op, 27u);
+  EXPECT_EQ(mask_result.vdst, result_tmp);
+  EXPECT_EQ(mask_result.src0, 255u);
+  EXPECT_EQ(mask_result.vsrc1, result_tmp);
+  EXPECT_EQ(cave_words[7], 0x0000FFFFu);
+
+  const auto shift_result = std::bit_cast<rdna4::Vop2MachineInst>(cave_words[8]);
+  EXPECT_EQ(shift_result.op, 24u);
+  EXPECT_EQ(shift_result.vdst, result_tmp);
+  EXPECT_EQ(shift_result.src0, scalar_positive_inline_u32(16));
+  EXPECT_EQ(shift_result.vsrc1, result_tmp);
+
+  const auto preserve_dst = std::bit_cast<rdna4::Vop2MachineInst>(cave_words[9]);
+  EXPECT_EQ(preserve_dst.op, 27u);
+  EXPECT_EQ(preserve_dst.vdst, 3u);
+  EXPECT_EQ(preserve_dst.src0, 255u);
+  EXPECT_EQ(preserve_dst.vsrc1, 3u);
+  EXPECT_EQ(cave_words[10], 0x0000FFFFu);
+
+  const auto merge_dst = std::bit_cast<rdna4::Vop2MachineInst>(cave_words[11]);
+  EXPECT_EQ(merge_dst.op, 28u);
+  EXPECT_EQ(merge_dst.vdst, 3u);
+  EXPECT_EQ(merge_dst.src0, 256u + result_tmp);
+  EXPECT_EQ(merge_dst.vsrc1, 3u);
+  EXPECT_EQ((cave_words[12] >> 16) & 0x7Fu, sopp_op_branch(ROCJITSU_CODE_ARCH_RDNA4));
 }
 
 TEST(BinaryTranslator, Gfx1250VLshlrevB16HighDstLowersThroughB32MaskMerge) {
@@ -7612,12 +8037,14 @@ TEST(BinaryTranslator, Gfx1250Vopd3DualCndmaskLowersThroughCave) {
 
   const Section *translations = find_section(translated, ".rj_translations");
   ASSERT_NE(translations, nullptr);
-  ASSERT_EQ(translations->size(), 5u * sizeof(uint32_t));
-  std::array<uint32_t, 5> cave_words{};
-  std::memcpy(cave_words.data(), translations->data(), translations->size());
+  const auto cave_words = section_words_for_test(*translations);
+  const auto base =
+      find_vop3_for_test(cave_words, 257u, 0u, scalar_positive_inline_u32(0), 256u + 8u, 2u);
+  ASSERT_TRUE(base.has_value());
+  ASSERT_LE(*base + 5u, cave_words.size());
 
   rdna4::Vop3MachineInst cndmask_x{};
-  std::memcpy(&cndmask_x, cave_words.data(), sizeof(cndmask_x));
+  std::memcpy(&cndmask_x, cave_words.data() + *base, sizeof(cndmask_x));
   EXPECT_EQ(cndmask_x.encoding, 0x35u);
   EXPECT_EQ(cndmask_x.op, 257u);
   EXPECT_EQ(cndmask_x.vdst, 0u);
@@ -7626,14 +8053,136 @@ TEST(BinaryTranslator, Gfx1250Vopd3DualCndmaskLowersThroughCave) {
   EXPECT_EQ(cndmask_x.src2, 2u);
 
   rdna4::Vop3MachineInst cndmask_y{};
-  std::memcpy(&cndmask_y, cave_words.data() + 2, sizeof(cndmask_y));
+  std::memcpy(&cndmask_y, cave_words.data() + *base + 2, sizeof(cndmask_y));
   EXPECT_EQ(cndmask_y.encoding, 0x35u);
   EXPECT_EQ(cndmask_y.op, 257u);
   EXPECT_EQ(cndmask_y.vdst, 1u);
   EXPECT_EQ(cndmask_y.src0, scalar_positive_inline_u32(0));
   EXPECT_EQ(cndmask_y.src1, 256u + 9u);
   EXPECT_EQ(cndmask_y.src2, 3u);
-  EXPECT_EQ((cave_words[4] >> 16) & 0x7Fu, sopp_op_branch(ROCJITSU_CODE_ARCH_RDNA4));
+  EXPECT_EQ((cave_words[*base + 4u] >> 16) & 0x7Fu, sopp_op_branch(ROCJITSU_CODE_ARCH_RDNA4));
+}
+
+TEST(BinaryTranslator, Gfx1250Vopd3DualFmaLowersThroughCave) {
+  constexpr uint32_t kGfx1250SEndpgm = 0xBFB00000u;
+  const auto vopd =
+      make_gfx1250_vopd3(19, 256 + 1, 2, 3, 4, 19, 256 + 5, 6, 7, 8, 0x5, 0x6);
+  const std::array<uint32_t, 4> text_words = {vopd[0], vopd[1], vopd[2], kGfx1250SEndpgm};
+
+  auto image =
+      make_minimal_amdgpu_elf_with_descriptor_and_text(text_words, EF_AMDGPU_MACH_AMDGCN_GFX1250);
+  AmdGpuCodeObject co(image.data(), image.size());
+  ASSERT_TRUE(co.is_valid());
+
+  BinaryTranslator translator(ROCJITSU_CODE_ARCH_GFX1250, ROCJITSU_CODE_ARCH_RDNA4,
+                              EF_AMDGPU_MACH_AMDGCN_GFX1201);
+  auto result = translator.translate(co);
+  ASSERT_FALSE(result.elf_bytes.empty());
+  EXPECT_TRUE(result.warnings.empty());
+
+  AmdGpuCodeObject translated(result.elf_bytes.data(), result.elf_bytes.size());
+  ASSERT_TRUE(translated.is_valid());
+  ASSERT_FALSE(translated.text_sections().empty());
+  const auto *text = translated.text_sections()[0];
+  ASSERT_EQ(text->size(), text_words.size() * sizeof(uint32_t));
+
+  std::array<uint32_t, text_words.size()> patched_text{};
+  std::memcpy(patched_text.data(), text->data(), text->size());
+  EXPECT_EQ((patched_text[0] >> 16) & 0x7Fu, sopp_op_branch(ROCJITSU_CODE_ARCH_RDNA4));
+  EXPECT_EQ(patched_text[1], build_s_nop(0, ROCJITSU_CODE_ARCH_RDNA4));
+  EXPECT_EQ(patched_text[2], build_s_nop(0, ROCJITSU_CODE_ARCH_RDNA4));
+  EXPECT_EQ(patched_text[3], kGfx1250SEndpgm);
+
+  const Section *translations = find_section(translated, ".rj_translations");
+  ASSERT_NE(translations, nullptr);
+  const auto cave_words = section_words_for_test(*translations);
+  const auto base =
+      find_vop3_for_test(cave_words, 531u, 4u, 256u + 1u, 256u + 2u, 256u + 3u);
+  ASSERT_TRUE(base.has_value());
+  ASSERT_LE(*base + 5u, cave_words.size());
+
+  rdna4::Vop3MachineInst fma_x{};
+  std::memcpy(&fma_x, cave_words.data() + *base, sizeof(fma_x));
+  EXPECT_EQ(fma_x.encoding, 0x35u);
+  EXPECT_EQ(fma_x.op, 531u);
+  EXPECT_EQ(fma_x.vdst, 4u);
+  EXPECT_EQ(fma_x.src0, 256u + 1u);
+  EXPECT_EQ(fma_x.src1, 256u + 2u);
+  EXPECT_EQ(fma_x.src2, 256u + 3u);
+  EXPECT_EQ(fma_x.neg, 0x5u);
+
+  rdna4::Vop3MachineInst fma_y{};
+  std::memcpy(&fma_y, cave_words.data() + *base + 2, sizeof(fma_y));
+  EXPECT_EQ(fma_y.encoding, 0x35u);
+  EXPECT_EQ(fma_y.op, 531u);
+  EXPECT_EQ(fma_y.vdst, 8u);
+  EXPECT_EQ(fma_y.src0, 256u + 5u);
+  EXPECT_EQ(fma_y.src1, 256u + 6u);
+  EXPECT_EQ(fma_y.src2, 256u + 7u);
+  EXPECT_EQ(fma_y.neg, 0x6u);
+  EXPECT_EQ((cave_words[*base + 4u] >> 16) & 0x7Fu, sopp_op_branch(ROCJITSU_CODE_ARCH_RDNA4));
+}
+
+TEST(BinaryTranslator, Gfx1250Vopd3DualFmaWithoutNegLowersToMulAddThroughCave) {
+  constexpr uint32_t kGfx1250SEndpgm = 0xBFB00000u;
+  const auto vopd = make_gfx1250_vopd3(19, 256 + 1, 2, 3, 4, 19, 256 + 5, 6, 7, 8);
+  const std::array<uint32_t, 4> text_words = {vopd[0], vopd[1], vopd[2], kGfx1250SEndpgm};
+
+  auto image =
+      make_minimal_amdgpu_elf_with_descriptor_and_text(text_words, EF_AMDGPU_MACH_AMDGCN_GFX1250);
+  AmdGpuCodeObject co(image.data(), image.size());
+  ASSERT_TRUE(co.is_valid());
+
+  BinaryTranslator translator(ROCJITSU_CODE_ARCH_GFX1250, ROCJITSU_CODE_ARCH_RDNA4,
+                              EF_AMDGPU_MACH_AMDGCN_GFX1201);
+  auto result = translator.translate(co);
+  ASSERT_FALSE(result.elf_bytes.empty());
+  EXPECT_TRUE(result.warnings.empty());
+
+  AmdGpuCodeObject translated(result.elf_bytes.data(), result.elf_bytes.size());
+  ASSERT_TRUE(translated.is_valid());
+  ASSERT_FALSE(translated.text_sections().empty());
+  const auto *text = translated.text_sections()[0];
+  ASSERT_EQ(text->size(), text_words.size() * sizeof(uint32_t));
+
+  std::array<uint32_t, text_words.size()> patched_text{};
+  std::memcpy(patched_text.data(), text->data(), text->size());
+  EXPECT_EQ((patched_text[0] >> 16) & 0x7Fu, sopp_op_branch(ROCJITSU_CODE_ARCH_RDNA4));
+  EXPECT_EQ(patched_text[1], build_s_nop(0, ROCJITSU_CODE_ARCH_RDNA4));
+  EXPECT_EQ(patched_text[2], build_s_nop(0, ROCJITSU_CODE_ARCH_RDNA4));
+  EXPECT_EQ(patched_text[3], kGfx1250SEndpgm);
+
+  const Section *translations = find_section(translated, ".rj_translations");
+  ASSERT_NE(translations, nullptr);
+  const auto cave_words = section_words_for_test(*translations);
+  const auto base = find_vop2_for_test(cave_words, 8u, 4u, 256u + 1u, 2u);
+  ASSERT_TRUE(base.has_value());
+  ASSERT_LE(*base + 5u, cave_words.size());
+
+  const auto mul_x = std::bit_cast<rdna4::Vop2MachineInst>(cave_words[*base]);
+  EXPECT_EQ(mul_x.op, 8u);
+  EXPECT_EQ(mul_x.vdst, 4u);
+  EXPECT_EQ(mul_x.src0, 256u + 1u);
+  EXPECT_EQ(mul_x.vsrc1, 2u);
+
+  const auto add_x = std::bit_cast<rdna4::Vop2MachineInst>(cave_words[*base + 1u]);
+  EXPECT_EQ(add_x.op, 3u);
+  EXPECT_EQ(add_x.vdst, 4u);
+  EXPECT_EQ(add_x.src0, 256u + 3u);
+  EXPECT_EQ(add_x.vsrc1, 4u);
+
+  const auto mul_y = std::bit_cast<rdna4::Vop2MachineInst>(cave_words[*base + 2u]);
+  EXPECT_EQ(mul_y.op, 8u);
+  EXPECT_EQ(mul_y.vdst, 8u);
+  EXPECT_EQ(mul_y.src0, 256u + 5u);
+  EXPECT_EQ(mul_y.vsrc1, 6u);
+
+  const auto add_y = std::bit_cast<rdna4::Vop2MachineInst>(cave_words[*base + 3u]);
+  EXPECT_EQ(add_y.op, 3u);
+  EXPECT_EQ(add_y.vdst, 8u);
+  EXPECT_EQ(add_y.src0, 256u + 7u);
+  EXPECT_EQ(add_y.vsrc1, 8u);
+  EXPECT_EQ((cave_words[*base + 4u] >> 16) & 0x7Fu, sopp_op_branch(ROCJITSU_CODE_ARCH_RDNA4));
 }
 
 TEST(BinaryTranslator, Gfx1250UnhandledVopd3DoesNotUseEncodingFallback) {

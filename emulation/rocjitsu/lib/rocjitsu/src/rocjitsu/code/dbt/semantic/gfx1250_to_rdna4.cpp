@@ -3196,8 +3196,41 @@ std::vector<uint32_t> expand_v_min_i64_vop3(const Instruction &inst, uint32_t, u
   return src;
 }
 
+[[nodiscard]] bool stage_pk_high_lane_vdst_low_source(const Instruction &inst,
+                                                      const LivenessAnalysis &liveness,
+                                                      uint8_t vdst,
+                                                      std::span<const uint16_t> all_sources,
+                                                      std::span<uint16_t> high_sources,
+                                                      std::vector<uint32_t> &words) {
+  const uint16_t old_vdst_low = static_cast<uint16_t>(256u + vdst);
+  const bool needs_stage =
+      std::ranges::any_of(high_sources, [old_vdst_low](uint16_t src) { return src == old_vdst_low; });
+  if (!needs_stage)
+    return true;
+
+  std::vector<uint8_t> avoid;
+  add_avoid_vgpr(avoid, vdst);
+  add_avoid_vgpr(avoid, static_cast<uint8_t>(vdst + 1u));
+  for (const uint16_t src : all_sources)
+    add_avoid_src_vgpr(avoid, src);
+
+  const auto tmp_opt = find_free_vgpr_run_avoiding(inst, liveness, 1, avoid);
+  if (!tmp_opt)
+    return false;
+
+  constexpr uint8_t kOpMovB32 = 1;
+  const uint8_t tmp = static_cast<uint8_t>(*tmp_opt);
+  append_vop1(words, kOpMovB32, tmp, old_vdst_low);
+  words.push_back(build_s_wait_alu(kWaitAluDepctrVaVdst0, ROCJITSU_CODE_ARCH_RDNA4));
+  for (uint16_t &src : high_sources) {
+    if (src == old_vdst_low)
+      src = static_cast<uint16_t>(256u + tmp);
+  }
+  return true;
+}
+
 std::vector<uint32_t> expand_v_pk_add_f32_vop3p(const Instruction &inst, uint32_t, uint64_t,
-                                                const LivenessAnalysis &, const LaneLayout *,
+                                                const LivenessAnalysis &liveness, const LaneLayout *,
                                                 const LaneLayout *) {
   const auto *raw = inst.raw_encoding();
   if (!raw || inst.size() != sizeof(gfx1250::Vop3pMachineInst))
@@ -3216,18 +3249,118 @@ std::vector<uint32_t> expand_v_pk_add_f32_vop3p(const Instruction &inst, uint32_
     return {};
 
   constexpr uint16_t kOpAddF32 = 259;
+  std::array<uint16_t, 2> lo_srcs{*lo_src0, *lo_src1};
+  std::array<uint16_t, 2> hi_srcs{*hi_src0, *hi_src1};
+  std::array<uint16_t, 4> all_srcs{lo_srcs[0], lo_srcs[1], hi_srcs[0], hi_srcs[1]};
   std::vector<uint32_t> words;
-  words.reserve(4);
+  words.reserve(6);
+  if (!stage_pk_high_lane_vdst_low_source(inst, liveness, static_cast<uint8_t>(src.vdst),
+                                          all_srcs, hi_srcs, words))
+    return {};
   {
-    auto [w0, w1] = build_vop3_mod(kOpAddF32, static_cast<uint8_t>(src.vdst), *lo_src0, *lo_src1, 0,
-                                   0, 0, src.clamp != 0, 0, static_cast<uint8_t>(src.neg & 0x3u));
+    auto [w0, w1] =
+        build_vop3_mod(kOpAddF32, static_cast<uint8_t>(src.vdst), lo_srcs[0], lo_srcs[1], 0, 0, 0,
+                       src.clamp != 0, 0, static_cast<uint8_t>(src.neg & 0x3u));
     words.push_back(w0);
     words.push_back(w1);
   }
   {
     auto [w0, w1] =
-        build_vop3_mod(kOpAddF32, static_cast<uint8_t>(src.vdst + 1u), *hi_src0, *hi_src1, 0, 0, 0,
+        build_vop3_mod(kOpAddF32, static_cast<uint8_t>(src.vdst + 1u), hi_srcs[0], hi_srcs[1], 0, 0, 0,
                        src.clamp != 0, 0, static_cast<uint8_t>(src.neg_hi & 0x3u));
+    words.push_back(w0);
+    words.push_back(w1);
+  }
+  return words;
+}
+
+std::vector<uint32_t> expand_v_pk_mul_f32_vop3p(const Instruction &inst, uint32_t, uint64_t,
+                                                const LivenessAnalysis &liveness, const LaneLayout *,
+                                                const LaneLayout *) {
+  const auto *raw = inst.raw_encoding();
+  if (!raw || inst.size() != sizeof(gfx1250::Vop3pMachineInst))
+    return {};
+
+  gfx1250::Vop3pMachineInst src{};
+  std::memcpy(&src, raw, sizeof(src));
+  if (src.vdst == 255)
+    return {};
+
+  const auto lo_src0 = pk_f32_lane_src(static_cast<uint16_t>(src.src0), (src.opsel & 0x1u) != 0);
+  const auto lo_src1 = pk_f32_lane_src(static_cast<uint16_t>(src.src1), (src.opsel & 0x2u) != 0);
+  const auto hi_src0 = pk_f32_lane_src(static_cast<uint16_t>(src.src0), (src.opsel_hi & 0x1u) != 0);
+  const auto hi_src1 = pk_f32_lane_src(static_cast<uint16_t>(src.src1), (src.opsel_hi & 0x2u) != 0);
+  if (!lo_src0 || !lo_src1 || !hi_src0 || !hi_src1)
+    return {};
+
+  constexpr uint16_t kOpMulF32 = 264;
+  std::array<uint16_t, 2> lo_srcs{*lo_src0, *lo_src1};
+  std::array<uint16_t, 2> hi_srcs{*hi_src0, *hi_src1};
+  std::array<uint16_t, 4> all_srcs{lo_srcs[0], lo_srcs[1], hi_srcs[0], hi_srcs[1]};
+  std::vector<uint32_t> words;
+  words.reserve(6);
+  if (!stage_pk_high_lane_vdst_low_source(inst, liveness, static_cast<uint8_t>(src.vdst),
+                                          all_srcs, hi_srcs, words))
+    return {};
+  {
+    auto [w0, w1] = build_vop3_mod(kOpMulF32, static_cast<uint8_t>(src.vdst), lo_srcs[0],
+                                   lo_srcs[1], 0, 0, 0, src.clamp != 0, 0,
+                                   static_cast<uint8_t>(src.neg & 0x3u));
+    words.push_back(w0);
+    words.push_back(w1);
+  }
+  {
+    auto [w0, w1] =
+        build_vop3_mod(kOpMulF32, static_cast<uint8_t>(src.vdst + 1u), hi_srcs[0], hi_srcs[1], 0, 0, 0,
+                       src.clamp != 0, 0, static_cast<uint8_t>(src.neg_hi & 0x3u));
+    words.push_back(w0);
+    words.push_back(w1);
+  }
+  return words;
+}
+
+std::vector<uint32_t> expand_v_pk_fma_f32_vop3p(const Instruction &inst, uint32_t, uint64_t,
+                                                const LivenessAnalysis &liveness, const LaneLayout *,
+                                                const LaneLayout *) {
+  const auto *raw = inst.raw_encoding();
+  if (!raw || inst.size() != sizeof(gfx1250::Vop3pMachineInst))
+    return {};
+
+  gfx1250::Vop3pMachineInst src{};
+  std::memcpy(&src, raw, sizeof(src));
+  if (src.vdst == 255)
+    return {};
+
+  const auto lo_src0 = pk_f32_lane_src(static_cast<uint16_t>(src.src0), (src.opsel & 0x1u) != 0);
+  const auto lo_src1 = pk_f32_lane_src(static_cast<uint16_t>(src.src1), (src.opsel & 0x2u) != 0);
+  const auto lo_src2 = pk_f32_lane_src(static_cast<uint16_t>(src.src2), (src.opsel & 0x4u) != 0);
+  const auto hi_src0 = pk_f32_lane_src(static_cast<uint16_t>(src.src0), (src.opsel_hi & 0x1u) != 0);
+  const auto hi_src1 = pk_f32_lane_src(static_cast<uint16_t>(src.src1), (src.opsel_hi & 0x2u) != 0);
+  const auto hi_src2 = pk_f32_lane_src(static_cast<uint16_t>(src.src2), src.pad_14 != 0);
+  if (!lo_src0 || !lo_src1 || !lo_src2 || !hi_src0 || !hi_src1 || !hi_src2)
+    return {};
+
+  constexpr uint16_t kOpFmaF32 = 531;
+  std::array<uint16_t, 3> lo_srcs{*lo_src0, *lo_src1, *lo_src2};
+  std::array<uint16_t, 3> hi_srcs{*hi_src0, *hi_src1, *hi_src2};
+  std::array<uint16_t, 6> all_srcs{lo_srcs[0], lo_srcs[1], lo_srcs[2],
+                                   hi_srcs[0], hi_srcs[1], hi_srcs[2]};
+  std::vector<uint32_t> words;
+  words.reserve(6);
+  if (!stage_pk_high_lane_vdst_low_source(inst, liveness, static_cast<uint8_t>(src.vdst),
+                                          all_srcs, hi_srcs, words))
+    return {};
+  {
+    auto [w0, w1] = build_vop3_mod(kOpFmaF32, static_cast<uint8_t>(src.vdst), lo_srcs[0],
+                                   lo_srcs[1], lo_srcs[2], 0, 0, src.clamp != 0, 0,
+                                   static_cast<uint8_t>(src.neg & 0x7u));
+    words.push_back(w0);
+    words.push_back(w1);
+  }
+  {
+    auto [w0, w1] =
+        build_vop3_mod(kOpFmaF32, static_cast<uint8_t>(src.vdst + 1u), hi_srcs[0], hi_srcs[1], hi_srcs[2],
+                       0, 0, src.clamp != 0, 0, static_cast<uint8_t>(src.neg_hi & 0x7u));
     words.push_back(w0);
     words.push_back(w1);
   }
@@ -4924,7 +5057,8 @@ std::vector<uint32_t> expand_v_bitop3_b16_vop3(const Instruction &inst, uint32_t
   gfx1250::Vop3MachineInst src{};
   std::memcpy(&src, raw, sizeof(src));
   const uint8_t truth_table = static_cast<uint8_t>((src.omod << 6) | (src.abs << 3) | src.neg);
-  if ((truth_table != 0xEC && truth_table != 0xF8) || src.clamp != 0 || src.vdst == 255)
+  if ((truth_table != 0xEC && truth_table != 0xF8 && truth_table != 0xFE) || src.clamp != 0 ||
+      src.vdst == 255)
     return {};
   if (src.src0 == 254 || src.src1 == 254 || src.src2 == 254)
     return {};
@@ -4975,9 +5109,12 @@ std::vector<uint32_t> expand_v_bitop3_b16_vop3(const Instruction &inst, uint32_t
   if (truth_table == 0xEC) {
     append_vop2(words, kOpAndB32, result, vgpr_src(tmp0), tmp2);
     append_vop2(words, kOpOrB32, result, vgpr_src(tmp1), result);
-  } else {
+  } else if (truth_table == 0xF8) {
     append_vop2(words, kOpAndB32, result, vgpr_src(tmp1), tmp2);
     append_vop2(words, kOpOrB32, result, vgpr_src(tmp0), result);
+  } else {
+    append_vop2(words, kOpOrB32, result, vgpr_src(tmp0), tmp1);
+    append_vop2(words, kOpOrB32, result, vgpr_src(tmp2), result);
   }
 
   append_merge_b16_result(words, static_cast<uint8_t>(src.vdst), result, dst_high);
@@ -5360,6 +5497,15 @@ struct VopdXyFields {
   if (slot.op == 19) {
     if (slot.src0 == 255)
       return {};
+    if (vopd_neg_mask(slot) == 0) {
+      constexpr uint8_t kOpMulF32 = 8;
+      constexpr uint8_t kOpAddF32 = 3;
+      std::vector<uint32_t> words;
+      words.reserve(2);
+      append_vop2(words, kOpMulF32, slot.vdst, slot.src0, slot.vsrc1);
+      append_vop2(words, kOpAddF32, slot.vdst, vopd_vgpr_src(slot.vsrc2), slot.vdst);
+      return words;
+    }
     auto [w0, w1] = build_vop3_mod(531, slot.vdst, slot.src0, vopd_vgpr_src(slot.vsrc1),
                                    vopd_vgpr_src(slot.vsrc2), 0, 0, false, 0, vopd_neg_mask(slot));
     return {w0, w1};
@@ -5402,8 +5548,6 @@ std::vector<uint32_t> expand_vopd3(const Instruction &inst, uint32_t host_arch, 
   words.reserve(first_words.size() + second_words.size());
   words.insert(words.end(), first_words.begin(), first_words.end());
   words.insert(words.end(), second_words.begin(), second_words.end());
-  if (words.size() > 3 && (fields->x.op != 9 || fields->y.op != 9))
-    return {};
   while (words.size() < 3)
     words.push_back(build_s_nop(0, static_cast<rj_code_arch_t>(host_arch)));
   return words;
@@ -5506,6 +5650,8 @@ constexpr uint16_t kOpVLshlOrB32Vop3 = 598;
 constexpr uint16_t kOpVMaxU64Vop3 = 793;
 constexpr uint16_t kOpVMinI64Vop3 = 794;
 constexpr uint16_t kOpVFmaMixF32Vop3p = 32;
+constexpr uint16_t kOpVPkFmaF32Vop3p = 31;
+constexpr uint16_t kOpVPkMulF32Vop3p = 40;
 constexpr uint16_t kOpVPkAddF32Vop3p = 41;
 constexpr uint16_t kOpVAddNcU64Vop3 = 296;
 constexpr uint16_t kOpVAddNcU64E32 = 40;
@@ -5685,8 +5831,12 @@ const TranslationRule kExpandRules_gfx1250_to_rdna4[] = {
      nullptr, nullptr},
     {kEncSopp, kOpSWaitTensorcnt, RuleAction::Expand, 0, 0, nullptr, lower_s_clause_to_nop, nullptr,
      nullptr},
+    {kEncVop3p, kOpVPkFmaF32Vop3p, RuleAction::Expand, 0, 0, nullptr, expand_v_pk_fma_f32_vop3p,
+     nullptr, nullptr},
     {kEncVop3p, kOpVFmaMixF32Vop3p, RuleAction::Expand, 0, 0, nullptr,
      lower_v_fma_mix_f32_inline_zero_acc, nullptr, nullptr},
+    {kEncVop3p, kOpVPkMulF32Vop3p, RuleAction::Expand, 0, 0, nullptr, expand_v_pk_mul_f32_vop3p,
+     nullptr, nullptr},
     {kEncVop3p, kOpVPkAddF32Vop3p, RuleAction::Expand, 0, 0, nullptr, expand_v_pk_add_f32_vop3p,
      nullptr, nullptr},
     {kEncVop3p, kOpVWmmaF32_16x16x128F8f6f4, RuleAction::Expand, 0, 0, nullptr,

@@ -210,7 +210,8 @@ private:
                   std::vector<std::pair<uint64_t, uint64_t>> &local_caves,
                   std::span<const std::pair<uint64_t, uint64_t>> protected_ranges,
                   bool allow_unreachable_text_caves, int16_t rdna4_grid_x_sgpr,
-                  InstructionList::Iterator block_begin, InstructionList::Iterator inst_it);
+                  InstructionList::Iterator block_begin, InstructionList::Iterator inst_it,
+                  std::span<BasicBlock *const> scope_blocks);
 
   /// @brief Translate one instruction to host instruction words.
   ///

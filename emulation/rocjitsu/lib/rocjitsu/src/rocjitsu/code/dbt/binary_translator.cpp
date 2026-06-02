@@ -746,6 +746,89 @@ enum class DescriptorUseScanResult : uint8_t {
   return false;
 }
 
+[[nodiscard]] bool zero_sgpr_was_used_as_descriptor_word2_after_def(
+    InstructionList::Iterator block_begin, InstructionList::Iterator inst_it, uint8_t sgpr) {
+  const auto resource_base = raw_buffer_resource_base_for_descriptor_word2(sgpr);
+  if (!resource_base)
+    return false;
+
+  for (auto scan_it = inst_it; scan_it != block_begin;) {
+    --scan_it;
+    const Instruction &prev = *scan_it;
+    if (!defines_sgpr(prev, sgpr))
+      continue;
+
+    bool zero_def = false;
+    if (const auto mov = decode_gfx1250_s_mov_b32(prev)) {
+      zero_def = mov->sdst == sgpr &&
+                 gfx1250_mov_src_is_zero(mov->ssrc0, mov->literal32, mov->literal64);
+    } else if (const auto mov = decode_gfx1250_s_mov_b64(prev)) {
+      zero_def = mov->sdst <= sgpr && sgpr < mov->sdst + 2u &&
+                 gfx1250_mov_src_is_zero(mov->ssrc0, mov->literal32, mov->literal64);
+    }
+    if (!zero_def)
+      return false;
+
+    for (auto use_it = scan_it;;) {
+      ++use_it;
+      if (use_it == inst_it)
+        return false;
+      if (defines_sgpr(*use_it, sgpr))
+        return false;
+      if (gfx1250_vbuffer_access_size_bytes(*use_it, *resource_base))
+        return true;
+    }
+  }
+  return false;
+}
+
+[[nodiscard]] bool zero_sgpr_was_used_as_descriptor_word2_in_scope(
+    std::span<BasicBlock *const> scope_blocks, uint64_t inst_offset, uint8_t sgpr) {
+  const auto resource_base = raw_buffer_resource_base_for_descriptor_word2(sgpr);
+  if (!resource_base)
+    return false;
+
+  std::optional<uint64_t> def_offset;
+  bool zero_def = false;
+  for (BasicBlock *block : scope_blocks) {
+    if (!block)
+      continue;
+    uint64_t offset = block->start_offset();
+    for (const Instruction &candidate : block->instructions()) {
+      if (offset >= inst_offset)
+        break;
+      if (defines_sgpr(candidate, sgpr) && (!def_offset || offset > *def_offset)) {
+        def_offset = offset;
+        zero_def = false;
+        if (const auto mov = decode_gfx1250_s_mov_b32(candidate)) {
+          zero_def = mov->sdst == sgpr &&
+                     gfx1250_mov_src_is_zero(mov->ssrc0, mov->literal32, mov->literal64);
+        } else if (const auto mov = decode_gfx1250_s_mov_b64(candidate)) {
+          zero_def = mov->sdst <= sgpr && sgpr < mov->sdst + 2u &&
+                     gfx1250_mov_src_is_zero(mov->ssrc0, mov->literal32, mov->literal64);
+        }
+      }
+      offset += candidate.size();
+    }
+  }
+  if (!def_offset || !zero_def)
+    return false;
+
+  for (BasicBlock *block : scope_blocks) {
+    if (!block)
+      continue;
+    uint64_t offset = block->start_offset();
+    for (const Instruction &candidate : block->instructions()) {
+      if (offset > *def_offset && offset < inst_offset &&
+          gfx1250_vbuffer_access_size_bytes(candidate, *resource_base)) {
+        return true;
+      }
+      offset += candidate.size();
+    }
+  }
+  return false;
+}
+
 void rewrite_gfx1250_zero_sgpr_v_mov_sources(std::vector<uint32_t> &words,
                                              const Instruction &inst,
                                              InstructionList::Iterator block_begin,
@@ -764,6 +847,54 @@ void rewrite_gfx1250_zero_sgpr_v_mov_sources(std::vector<uint32_t> &words,
 
     vop1.src0 = scalar_positive_inline_u32(0);
     word = std::bit_cast<uint32_t>(vop1);
+  }
+}
+
+[[nodiscard]] bool is_descriptor_setup_copy_from_tracked_sgpr(
+    const Instruction &inst, std::span<const uint8_t> tracked_sgprs);
+
+void rewrite_gfx1250_zero_sgpr_scalar_sources(std::vector<uint32_t> &words,
+                                              const Instruction &inst,
+                                              InstructionList::Iterator block_begin,
+                                              InstructionList::Iterator inst_it,
+                                              uint64_t inst_offset,
+                                              std::span<BasicBlock *const> scope_blocks) {
+  if (words.empty())
+    return;
+
+  const auto rewrite_descriptor_zero_src = [&](uint32_t src) -> uint32_t {
+    if (src >= 128u)
+      return src;
+    if (!is_raw_buffer_descriptor_word2_sgpr_src(src))
+      return src;
+
+    const auto sgpr = static_cast<uint8_t>(src);
+    if (!uses_sgpr(inst, sgpr))
+      return src;
+    if (is_descriptor_setup_copy_from_tracked_sgpr(inst, std::span<const uint8_t>(&sgpr, 1)))
+      return src;
+    const bool descriptor_zero_promoted =
+        zero_sgpr_was_used_as_descriptor_word2_after_def(block_begin, inst_it, sgpr) ||
+        zero_sgpr_was_used_as_descriptor_word2_in_scope(scope_blocks, inst_offset, sgpr);
+    if (!descriptor_zero_promoted)
+      return src;
+
+    return scalar_positive_inline_u32(0);
+  };
+
+  if (is_sop2_encoding(inst)) {
+    auto sop2 = std::bit_cast<rdna4::Sop2MachineInst>(words[0]);
+    sop2.ssrc0 = rewrite_descriptor_zero_src(sop2.ssrc0);
+    sop2.ssrc1 = rewrite_descriptor_zero_src(sop2.ssrc1);
+    words[0] = std::bit_cast<uint32_t>(sop2);
+    return;
+  }
+
+  if (inst.encoding_id() == kEnc_SOPC) {
+    auto sopc = std::bit_cast<rdna4::SopcMachineInst>(words[0]);
+    sopc.ssrc0 = rewrite_descriptor_zero_src(sopc.ssrc0);
+    sopc.ssrc1 = rewrite_descriptor_zero_src(sopc.ssrc1);
+    words[0] = std::bit_cast<uint32_t>(sopc);
   }
 }
 
@@ -4020,6 +4151,8 @@ TranslatedCodeObject BinaryTranslator::translate(const AmdGpuCodeObject &obj) {
                                                 scope.translation->rdna4_grid_x_sgpr);
           if (guest_arch_ == ROCJITSU_CODE_ARCH_GFX1250 && host_arch_ == ROCJITSU_CODE_ARCH_RDNA4) {
             rewrite_gfx1250_zero_sgpr_v_mov_sources(words, inst, instructions.begin(), inst_it);
+            rewrite_gfx1250_zero_sgpr_scalar_sources(words, inst, instructions.begin(), inst_it,
+                                                     offset, scope.blocks);
             if (words.size() == inst_size / sizeof(uint32_t) &&
                 rdna4_memory_dependency_wait_before(inst)) {
               words.insert(words.begin(),
@@ -4420,6 +4553,8 @@ TranslatedCodeObject BinaryTranslator::translate(const AmdGpuCodeObject &obj) {
                 host_arch_ == ROCJITSU_CODE_ARCH_RDNA4) {
               rewrite_gfx1250_zero_sgpr_v_mov_sources(expansion.words, inst, instructions.begin(),
                                                        it);
+              rewrite_gfx1250_zero_sgpr_scalar_sources(expansion.words, inst, instructions.begin(),
+                                                       it, offset, scope.blocks);
             }
             append_hardware_pending_warning(&result.warnings, inst.mnemonic());
             const bool emitted_in_cave = expansion.words.size() * sizeof(uint32_t) > inst_size;
@@ -4485,7 +4620,7 @@ TranslatedCodeObject BinaryTranslator::translate(const AmdGpuCodeObject &obj) {
         if (!handle_encoding(inst, offset, translated_text, dst_opcode, patcher, text, local_caves,
                              protected_ranges, allow_unreachable_text_caves,
                              scope.translation ? scope.translation->rdna4_grid_x_sgpr : -1,
-                             instructions.begin(), it)) {
+                             instructions.begin(), it, scope.blocks)) {
           if (continue_after_instruction_error(inst, offset)) {
             offset += inst_size;
             continue;
@@ -4823,7 +4958,8 @@ bool BinaryTranslator::handle_encoding(
     std::vector<std::pair<uint64_t, uint64_t>> &local_caves,
     std::span<const std::pair<uint64_t, uint64_t>> protected_ranges,
     bool allow_unreachable_text_caves, int16_t rdna4_grid_x_sgpr,
-    InstructionList::Iterator block_begin, InstructionList::Iterator inst_it) {
+    InstructionList::Iterator block_begin, InstructionList::Iterator inst_it,
+    std::span<BasicBlock *const> scope_blocks) {
   const uint32_t *raw = inst.raw_encoding();
   assert(raw && "handle_encoding called without raw encoding");
   const bool tracing = static_cast<bool>(trace_callback_);
@@ -4867,7 +5003,8 @@ bool BinaryTranslator::handle_encoding(
       // gaps would indicate a format mismatch, not a trailing literal.
       const uint32_t translated_bytes = tr.word_count * 4u;
       const uint32_t orig_bytes = inst.size();
-      if (orig_bytes - translated_bytes == 4 && tr.word_count < 3) {
+      if (orig_bytes >= translated_bytes && orig_bytes - translated_bytes == 4 &&
+          tr.word_count < 3) {
         uint32_t lit_word;
         std::memcpy(&lit_word, orig_text.data() + offset + translated_bytes, 4);
         tr.words[tr.word_count++] = lit_word;
@@ -4882,6 +5019,8 @@ bool BinaryTranslator::handle_encoding(
       !replacement_words.empty()) {
     remap_gfx1250_ttmp9_reads_to_sgpr(inst, rdna4_grid_x_sgpr, replacement_words);
     rewrite_gfx1250_zero_sgpr_v_mov_sources(replacement_words, inst, block_begin, inst_it);
+    rewrite_gfx1250_zero_sgpr_scalar_sources(replacement_words, inst, block_begin, inst_it,
+                                             offset, scope_blocks);
     if (rdna4_memory_dependency_wait_before(inst)) {
       replacement_words.insert(replacement_words.begin(),
                                build_s_wait_alu(kWaitAluDepctrVaVdstVmVsrc0, host_arch_));
