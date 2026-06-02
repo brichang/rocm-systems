@@ -77,15 +77,23 @@ def _attribute_pc_samples_native(
     per-sample lookup stays O(log N) instead of rebuilding the list on every row.
     """
     columns: dict[str, list[Optional[str]]] = {col: [] for col in _PC_NATIVE_COLUMNS}
-    offsets_by_coid = {
-        coid: [inst["code_obj_offset"] for inst in intervals]
-        for coid, intervals in code_obj_info.items()
-    }
+    # Build the offset key list only for code objects actually sampled, memoized
+    # so each referenced coid pays the construction cost at most once.
+    offsets_by_coid: dict[int, list[int]] = {}
+
+    def _offsets_for(coid: int, intervals: list[dict[str, Any]]) -> list[int]:
+        cached = offsets_by_coid.get(coid)
+        if cached is None:
+            cached = [inst["code_obj_offset"] for inst in intervals]
+            offsets_by_coid[coid] = cached
+        return cached
+
     for coid, off in zip(
         grouped_df["code_object_id"], grouped_df["code_object_offset"]
     ):
         intervals = code_obj_info.get(coid, [])
-        inst = match_instruction_for_offset(intervals, off, offsets_by_coid.get(coid))
+        offsets = _offsets_for(coid, intervals)
+        inst = match_instruction_for_offset(intervals, off, offsets)
         if inst is not None:
             source_file, line = split_instruction_comment(inst["comment"])
             columns["instruction"].append(inst["name"])

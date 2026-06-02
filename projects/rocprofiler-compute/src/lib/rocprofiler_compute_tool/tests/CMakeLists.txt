@@ -10,6 +10,7 @@ add_executable(
     test_sdk_callbacks.cpp
     test_environ_cache.h
     test_environ_cache.cpp
+    test_pc_sampling_feature.cpp
     mocks.h
     mocks.cpp
     main.cpp
@@ -23,6 +24,7 @@ target_link_libraries(
         gmock
         gsl_assert
         fmt::fmt
+        nlohmann_json
         asan_build_dependencies
 )
 

@@ -8,6 +8,7 @@
 
 #include <memory>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace rocprofiler_compute_tool
@@ -41,6 +42,16 @@ public:
     std::vector<std::string> collect_source_paths() override;
 
 private:
+    // Record a source path harvested from an instruction comment, preserving
+    // first-seen order and de-duplicating.
+    void record_source_path(const std::string& comment);
+
     std::shared_ptr<code_object_translator_t> m_translator;
+    // Source paths harvested during write()'s disassembly walk so finalize()
+    // does not need a second full traversal. collect_source_paths() falls back
+    // to its own walk when write() has not run.
+    std::vector<std::string>        m_source_paths;
+    std::unordered_set<std::string> m_seen_source_paths;
+    bool                            m_source_paths_collected = false;
 };
 }  // namespace rocprofiler_compute_tool

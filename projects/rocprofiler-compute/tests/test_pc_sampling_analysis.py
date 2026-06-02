@@ -9,7 +9,10 @@ import common
 import pandas as pd
 import pytest
 
-from rocprof_compute_analyze.analysis_db import db_analysis
+from rocprof_compute_analyze.analysis_db import (
+    _attribute_pc_samples_native,
+    db_analysis,
+)
 from utils import schema
 from utils.file_io import (
     build_agent_to_gpu_map,
@@ -22,6 +25,7 @@ from utils.parser import (
     load_pc_sampling_data_per_kernel,
     match_instruction_for_offset,
     nullify_unevaluated_metric_values,
+    resolve_snapshot_source_path,
     search_pc_sampling_record,
     split_instruction_comment,
 )
@@ -872,6 +876,40 @@ def test_split_instruction_comment_empty_side() -> None:
 
 
 # ═══════════════════════════════════════════════════════════════
+# resolve_snapshot_source_path
+# ═══════════════════════════════════════════════════════════════
+
+
+def test_resolve_snapshot_source_path_original_present(tmp_path: Path) -> None:
+    """When the original source path exists, keep the default display (None)."""
+    src = tmp_path / "kernel.hip"
+    src.write_text("// src\n")
+    comment = f"{src}:42"
+    assert resolve_snapshot_source_path(comment, tmp_path) is None
+
+
+def test_resolve_snapshot_source_path_falls_back_to_snapshot(tmp_path: Path) -> None:
+    """A missing original resolves to the snapshot copy under code_obj_sources/."""
+    missing = "/nonexistent/build/kernel.hip"
+    snapshot = tmp_path / "code_obj_sources" / missing.lstrip("/")
+    snapshot.parent.mkdir(parents=True)
+    snapshot.write_text("// snapshot\n")
+
+    resolved = resolve_snapshot_source_path(f"{missing}:42", tmp_path)
+    assert resolved == f"{snapshot}:42"
+
+
+def test_resolve_snapshot_source_path_no_snapshot(tmp_path: Path) -> None:
+    """A missing original with no snapshot copy returns None (default display)."""
+    assert resolve_snapshot_source_path("/gone/kernel.hip:42", tmp_path) is None
+
+
+def test_resolve_snapshot_source_path_unparsable_comment(tmp_path: Path) -> None:
+    """A comment without a parsable path returns None."""
+    assert resolve_snapshot_source_path("noColon", tmp_path) is None
+
+
+# ═══════════════════════════════════════════════════════════════
 # Helpers for native code-object JSON
 # ═══════════════════════════════════════════════════════════════
 
@@ -990,6 +1028,66 @@ def test_load_code_obj_info_multi_pid_merge(tmp_path: Path) -> None:
     assert set(merged.keys()) == {2, 3}
     assert len(merged[2]) == 2
     assert merged[3][0]["name"] == "v_mul_f32"
+
+
+def test_load_code_obj_info_skips_malformed_entries(tmp_path: Path) -> None:
+    """Instructions missing offset or size are skipped; valid ones survive."""
+    _write_code_obj_info(
+        tmp_path / "111_code_obj_info.json",
+        code_object_id=2,
+        symbol_name="vecCopy",
+        instructions=[
+            {  # missing "size"
+                "name": "s_load_b64",
+                "comment": "/home/u/kernel.hip:42",
+                "code_obj_offset": 0,
+            },
+            {  # missing "code_obj_offset"
+                "name": "s_nop",
+                "comment": "/home/u/kernel.hip:43",
+                "size": 4,
+            },
+            {  # valid
+                "name": "v_add_u32",
+                "comment": "/home/u/kernel.hip:44",
+                "code_obj_offset": 4,
+                "size": 4,
+            },
+        ],
+    )
+    merged = load_code_obj_info(tmp_path)
+    assert merged is not None
+    assert len(merged[2]) == 1
+    assert merged[2][0]["name"] == "v_add_u32"
+
+
+def test_load_code_obj_info_skips_unreadable_file(tmp_path: Path) -> None:
+    """A truncated/invalid-JSON file is skipped; a valid sibling still loads."""
+    bad = tmp_path / "111_code_obj_info.json"
+    bad.write_text('{"code_objects": [  truncated')
+    _write_code_obj_info(
+        tmp_path / "222_code_obj_info.json",
+        code_object_id=3,
+        symbol_name="vecAdd",
+        instructions=[
+            {
+                "name": "v_mul_f32",
+                "comment": "/home/u/add.hip:7",
+                "code_obj_offset": 0,
+                "size": 8,
+            }
+        ],
+    )
+    merged = load_code_obj_info(tmp_path)
+    assert merged is not None
+    assert set(merged.keys()) == {3}
+    assert merged[3][0]["name"] == "v_mul_f32"
+
+
+def test_load_code_obj_info_all_unreadable_returns_none(tmp_path: Path) -> None:
+    """When every native file fails to parse, return None for the SDK fallback."""
+    (tmp_path / "111_code_obj_info.json").write_text("{ not json")
+    assert load_code_obj_info(tmp_path) is None
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1115,6 +1213,41 @@ def test_calc_pc_sampling_data_native_branch(tmp_path: Path) -> None:
     assert row4["instruction"] == "v_add_u32"
     assert row4["source_file"] == "/home/u/kernel.hip"
     assert row4["line"] == "43"
+
+
+def test_attribute_pc_samples_native_no_match_offset() -> None:
+    """An offset that falls in a gap yields None for every native column."""
+    code_obj_info = {
+        2: [
+            {
+                "code_obj_offset": 0,
+                "size": 4,
+                "name": "s_load_b64",
+                "comment": "/home/u/kernel.hip:42",
+            },
+            {
+                "code_obj_offset": 16,
+                "size": 4,
+                "name": "v_add_u32",
+                "comment": "/home/u/kernel.hip:43",
+            },
+        ]
+    }
+    # Offset 8 falls in the [4, 16) gap; offset 16 matches the second interval.
+    grouped_df = pd.DataFrame({"code_object_id": [2, 2], "code_object_offset": [8, 16]})
+
+    columns = _attribute_pc_samples_native(grouped_df, code_obj_info)
+
+    # Gap offset -> all native columns None.
+    assert columns["instruction"][0] is None
+    assert columns["source_line"][0] is None
+    assert columns["source_file"][0] is None
+    assert columns["line"][0] is None
+
+    # Matched offset still resolves.
+    assert columns["instruction"][1] == "v_add_u32"
+    assert columns["source_file"][1] == "/home/u/kernel.hip"
+    assert columns["line"][1] == "43"
 
 
 def test_calc_pc_sampling_data_fallback_branch(tmp_path: Path) -> None:

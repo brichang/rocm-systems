@@ -701,16 +701,19 @@ def load_pc_sampling_data_per_kernel(
 
     # Load source code comments (if available)
     pc_sample_comments = search_key_in_json(file_name, "pc_sample_comments")
+    workload_dir = Path(file_name).parent
+
+    def _display_source(index: int) -> Optional[str]:
+        if index >= len(pc_sample_comments):
+            return None
+        comment = pc_sample_comments[index]
+        resolved = resolve_snapshot_source_path(comment, workload_dir)
+        if resolved is not None:
+            return resolved
+        return f".../{Path(comment).name}"
+
     df["source_line"] = (
-        df["inst_index"].apply(
-            lambda x: (
-                f".../{Path(pc_sample_comments[x]).name}"
-                if x < len(pc_sample_comments)
-                else None
-            )
-        )
-        if pc_sample_comments
-        else None
+        df["inst_index"].apply(_display_source) if pc_sample_comments else None
     )
 
     # Sorting and returning relevant columns depending on method and sorting_type
@@ -825,8 +828,18 @@ def load_pc_sampling_data(
                 "count",
             ]
         ]
+        workload_dir = Path(dir_path)
+
+        def _display_source(comment: object) -> object:
+            if not isinstance(comment, str) or not comment:
+                return comment
+            resolved = resolve_snapshot_source_path(comment, workload_dir)
+            if resolved is not None:
+                return resolved
+            return f".../{Path(comment).name}"
+
         grouped_counts["source_line"] = grouped_counts["source_line"].apply(
-            lambda x: f".../{Path(x).name}" if isinstance(x, str) and x else x
+            _display_source
         )
 
         return grouped_counts.sort_values(by="count", ascending=False)
@@ -890,6 +903,40 @@ def split_instruction_comment(
     return source_file, line
 
 
+def resolve_snapshot_source_path(
+    comment: Optional[str], workload_dir: Path
+) -> Optional[str]:
+    """Resolve an ISA ``path:line`` comment to a snapshot copy when needed.
+
+    Source paths baked into the disassembly are absolute on the capture host and
+    may not exist when the workload is analyzed elsewhere. PC sampling collection
+    snapshots the referenced files under ``<workload>/code_obj_sources/`` (the
+    leading ``/`` is dropped, mirroring ``copy_source_files``). When the original
+    path is missing but a snapshot copy exists, return ``"<snapshot>:line"`` so
+    the displayed reference points at a file that actually exists.
+
+    Returns None when there is no usable path, when the original file is still
+    present (keep the default display), or when no snapshot copy is found.
+    """
+
+    def _exists(path: Path) -> bool:
+        # Baked paths may point at inaccessible mounts on the analyze host;
+        # treat any stat error as "not present" rather than propagating.
+        try:
+            return path.exists()
+        except OSError:
+            return False
+
+    source_file, line = split_instruction_comment(comment)
+    if source_file is None or _exists(Path(source_file)):
+        return None
+
+    snapshot = workload_dir / "code_obj_sources" / source_file.lstrip("/")
+    if _exists(snapshot):
+        return f"{snapshot}:{line}"
+    return None
+
+
 @demarcate
 def load_code_obj_info(
     workload_path: Path,
@@ -911,8 +958,17 @@ def load_code_obj_info(
     merged: dict[int, list[dict[str, Any]]] = {}
 
     for native_file in native_files:
-        with native_file.open() as fh:
-            data = json.load(fh)
+        try:
+            with native_file.open() as fh:
+                data = json.load(fh)
+        except (json.JSONDecodeError, OSError) as err:
+            # A truncated or unreadable file (e.g. an interrupted capture) must
+            # not abort the whole analyze run; skip it and fall back to the
+            # rocprofiler-sdk strings if nothing usable parses.
+            console_warning(
+                f"PC sampling: skipping unreadable native file {native_file}: {err}"
+            )
+            continue
 
         for code_object in data.get("code_objects", []):
             code_object_id = code_object.get("id")
@@ -934,6 +990,16 @@ def load_code_obj_info(
                         "name": inst.get("name"),
                         "comment": inst.get("comment"),
                     })
+
+    if not merged:
+        # Every native file was unreadable or empty; signal absence so callers
+        # fall back to the rocprofiler-sdk strings instead of attributing
+        # against empty disassembly.
+        console_warning(
+            "PC sampling: no usable native code-object disassembly; "
+            "falling back to rocprofiler-sdk strings."
+        )
+        return None
 
     for instructions in merged.values():
         instructions.sort(key=lambda inst: inst["code_obj_offset"])

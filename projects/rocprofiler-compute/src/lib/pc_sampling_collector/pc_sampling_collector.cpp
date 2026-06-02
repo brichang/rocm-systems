@@ -40,8 +40,23 @@ void pc_sampling_collector_impl_t::on_code_object_load(
     }
 }
 
+void pc_sampling_collector_impl_t::record_source_path(const std::string& comment)
+{
+    if (auto path = parse_source_path(comment))
+    {
+        if (m_seen_source_paths.insert(*path).second)
+        {
+            m_source_paths.push_back(*path);
+        }
+    }
+}
+
 void pc_sampling_collector_impl_t::write(code_object_writer_t& writer)
 {
+    // Reset the harvest so a re-run reflects the current translator state.
+    m_source_paths.clear();
+    m_seen_source_paths.clear();
+
     for (const auto& id : m_translator->get_code_object_ids())
     {
         writer.start_code_obj(id);
@@ -55,6 +70,7 @@ void pc_sampling_collector_impl_t::write(code_object_writer_t& writer)
             {
                 const auto& inst = m_translator->get_instruction(id, pc);
                 Expects(inst.size);
+                record_source_path(inst.comment);
                 writer.write_instruction(inst);
                 pc += inst.size;
             }
@@ -62,12 +78,19 @@ void pc_sampling_collector_impl_t::write(code_object_writer_t& writer)
         }
         writer.end_code_obj();
     }
+
+    m_source_paths_collected = true;
 }
 
 std::vector<std::string> pc_sampling_collector_impl_t::collect_source_paths()
 {
-    std::vector<std::string>        result;
-    std::unordered_set<std::string> seen;
+    // write() harvests source paths during its disassembly walk, so finalize()
+    // can reuse them instead of paying for a second full traversal. When write()
+    // has not run, walk once here so the method stays callable independently.
+    if (m_source_paths_collected)
+    {
+        return m_source_paths;
+    }
 
     for (const auto& id : m_translator->get_code_object_ids())
     {
@@ -84,17 +107,12 @@ std::vector<std::string> pc_sampling_collector_impl_t::collect_source_paths()
                     // Best-effort: avoid an infinite loop without aborting the run.
                     break;
                 }
-                if (auto path = parse_source_path(inst.comment))
-                {
-                    if (seen.insert(*path).second)
-                    {
-                        result.push_back(*path);
-                    }
-                }
+                record_source_path(inst.comment);
                 pc += inst.size;
             }
         }
     }
 
-    return result;
+    m_source_paths_collected = true;
+    return m_source_paths;
 }
