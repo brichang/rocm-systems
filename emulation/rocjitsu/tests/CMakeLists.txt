@@ -74,6 +74,28 @@ if(HAS_DEVICE_KERNELS)
 endif()
 rj_configure_target(rocjitsu_tests TEST)
 
+set(RJ_IREE_GFX1250_VALIDATION_DIR
+    "${CMAKE_SOURCE_DIR}/../../../iree-gfx1250-validation"
+    CACHE PATH
+    "Path to the workspace IREE gfx1250 validation artifact bundle"
+)
+if(EXISTS "${RJ_IREE_GFX1250_VALIDATION_DIR}/instruction_audit.json")
+    target_compile_definitions(
+        rocjitsu_tests
+        PRIVATE IREE_GFX1250_VALIDATION_DIR="${RJ_IREE_GFX1250_VALIDATION_DIR}"
+    )
+    message(
+        STATUS
+        "IREE gfx1250 artifact translation test enabled (${RJ_IREE_GFX1250_VALIDATION_DIR})"
+    )
+else()
+    message(
+        STATUS
+        "IREE gfx1250 artifact translation test will skip "
+        "(missing ${RJ_IREE_GFX1250_VALIDATION_DIR})"
+    )
+endif()
+
 include(GoogleTest)
 gtest_discover_tests(rocjitsu_tests)
 
@@ -310,6 +332,28 @@ if(HSA_RUNTIME64)
                 STATUS
                 "HSA translate vector_add test built but NOT registered with CTest "
                 "(no supported DBT GPU)"
+            )
+        endif()
+
+        if(HAS_RDNA4_GPU AND HAS_GFX1250_DEVICE_KERNELS)
+            add_test(
+                NAME "HsaTranslateTest.TranslateAndDispatchGfx1250VectorAdd"
+                COMMAND hsa_translate_test --gtest_filter=*Gfx1250VectorAdd*
+                WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+            )
+            set_tests_properties(
+                "HsaTranslateTest.TranslateAndDispatchGfx1250VectorAdd"
+                PROPERTIES TIMEOUT 60
+            )
+            message(
+                STATUS
+                "HSA translate gfx1250 vector_add test enabled (RDNA4 GPU detected)"
+            )
+        else()
+            message(
+                STATUS
+                "HSA translate gfx1250 vector_add test built but NOT registered with CTest "
+                "(no RDNA4 GPU or gfx1250 fixture)"
             )
         endif()
 

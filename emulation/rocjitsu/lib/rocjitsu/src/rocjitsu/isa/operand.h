@@ -51,6 +51,9 @@ public:
   /// @brief Raw encoding value from the instruction binary.
   int encoding_value() const { return encoding_value_; }
 
+  /// @brief Full 64-bit literal value when this operand came from a literal64 encoding.
+  [[nodiscard]] virtual std::optional<uint64_t> literal64_value() const { return std::nullopt; }
+
   /// @brief Operand width in bits.
   int size_bits() const { return size_bits_; }
 

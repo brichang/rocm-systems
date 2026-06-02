@@ -17,6 +17,7 @@
 #include "rocjitsu/isa/arch/amdgpu/rdna4/isa.h"
 #include "rocjitsu/isa/isa_traits.h"
 #include "util/bit.h"
+#include "rocjitsu/vm/amdgpu/vgpr_msb.h"
 
 #include "rocjitsu/base/rj_compiler.h"
 RJ_DIAGNOSTIC_PUSH
@@ -30,6 +31,7 @@ RJ_DIAGNOSTIC_POP
 #include <limits>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_set>
 #include <utility>
 
@@ -48,6 +50,15 @@ constexpr uint16_t kScalarOperandTtmpBase = 108;
 constexpr uint16_t kTtmpRdna4GridYz = 7;
 constexpr uint16_t kTtmpRdna4GridX = 9;
 
+[[nodiscard]] constexpr uint16_t build_hwreg(uint8_t reg_id, uint8_t offset, uint8_t size) {
+  return static_cast<uint16_t>((reg_id & 0x3Fu) | ((offset & 0x1Fu) << 6) |
+                               (((size - 1u) & 0x1Fu) << 11));
+}
+
+[[nodiscard]] constexpr uint32_t build_sopk(uint8_t op, uint16_t simm16, uint8_t sdst = 0) {
+  return 0xB0000000u | (simm16 & 0xFFFFu) | ((sdst & 0x7Fu) << 16) | ((op & 0x1Fu) << 23);
+}
+
 // -----------------------------------------------------------------------------
 // ISA-family helpers.
 // -----------------------------------------------------------------------------
@@ -60,7 +71,11 @@ constexpr uint16_t kTtmpRdna4GridX = 9;
 [[nodiscard]] bool is_rdna_arch(rj_code_arch_t arch) {
   return arch == ROCJITSU_CODE_ARCH_RDNA1 || arch == ROCJITSU_CODE_ARCH_RDNA2 ||
          arch == ROCJITSU_CODE_ARCH_RDNA3 || arch == ROCJITSU_CODE_ARCH_RDNA3_5 ||
-         arch == ROCJITSU_CODE_ARCH_RDNA4 || arch == ROCJITSU_CODE_ARCH_GFX1250;
+         arch == ROCJITSU_CODE_ARCH_RDNA4;
+}
+
+[[nodiscard]] bool is_gfx1250_arch(rj_code_arch_t arch) {
+  return arch == ROCJITSU_CODE_ARCH_GFX1250;
 }
 
 [[nodiscard]] bool arch_supports_wave_size(rj_code_arch_t arch, uint32_t wf) {
@@ -73,6 +88,8 @@ constexpr uint16_t kTtmpRdna4GridX = 9;
     return supports_wave_size<cdna3::Isa>(wf);
   case ROCJITSU_CODE_ARCH_CDNA4:
     return supports_wave_size<cdna4::Isa>(wf);
+  case ROCJITSU_CODE_ARCH_GFX1250:
+    return supports_wave_size<gfx1250::Isa>(wf);
   case ROCJITSU_CODE_ARCH_RDNA1:
     return supports_wave_size<rdna1::Isa>(wf);
   case ROCJITSU_CODE_ARCH_RDNA2:
@@ -83,8 +100,6 @@ constexpr uint16_t kTtmpRdna4GridX = 9;
     return supports_wave_size<rdna3_5::Isa>(wf);
   case ROCJITSU_CODE_ARCH_RDNA4:
     return supports_wave_size<rdna4::Isa>(wf);
-  case ROCJITSU_CODE_ARCH_GFX1250:
-    return supports_wave_size<gfx1250::Isa>(wf);
   default:
     return false;
   }
@@ -100,6 +115,8 @@ constexpr uint16_t kTtmpRdna4GridX = 9;
     return cdna3::Isa::WF_SIZE;
   case ROCJITSU_CODE_ARCH_CDNA4:
     return cdna4::Isa::WF_SIZE;
+  case ROCJITSU_CODE_ARCH_GFX1250:
+    return gfx1250::Isa::WF_SIZE;
   case ROCJITSU_CODE_ARCH_RDNA1:
     return rdna1::Isa::WF_SIZE;
   case ROCJITSU_CODE_ARCH_RDNA2:
@@ -110,8 +127,6 @@ constexpr uint16_t kTtmpRdna4GridX = 9;
     return rdna3_5::Isa::WF_SIZE;
   case ROCJITSU_CODE_ARCH_RDNA4:
     return rdna4::Isa::WF_SIZE;
-  case ROCJITSU_CODE_ARCH_GFX1250:
-    return gfx1250::Isa::WF_SIZE;
   default:
     return 64;
   }
@@ -127,6 +142,8 @@ constexpr uint16_t kTtmpRdna4GridX = 9;
     return cdna3::Isa::MAX_SGPRS_PER_WF;
   case ROCJITSU_CODE_ARCH_CDNA4:
     return cdna4::Isa::MAX_SGPRS_PER_WF;
+  case ROCJITSU_CODE_ARCH_GFX1250:
+    return gfx1250::Isa::MAX_SGPRS_PER_WF;
   case ROCJITSU_CODE_ARCH_RDNA1:
     return rdna1::Isa::MAX_SGPRS_PER_WF;
   case ROCJITSU_CODE_ARCH_RDNA2:
@@ -137,8 +154,6 @@ constexpr uint16_t kTtmpRdna4GridX = 9;
     return rdna3_5::Isa::MAX_SGPRS_PER_WF;
   case ROCJITSU_CODE_ARCH_RDNA4:
     return rdna4::Isa::MAX_SGPRS_PER_WF;
-  case ROCJITSU_CODE_ARCH_GFX1250:
-    return gfx1250::Isa::MAX_SGPRS_PER_WF;
   default:
     return 0;
   }
@@ -154,6 +169,8 @@ constexpr uint16_t kTtmpRdna4GridX = 9;
     return cdna3::Isa::MAX_VGPRS_PER_WF;
   case ROCJITSU_CODE_ARCH_CDNA4:
     return cdna4::Isa::MAX_VGPRS_PER_WF;
+  case ROCJITSU_CODE_ARCH_GFX1250:
+    return gfx1250::Isa::MAX_ADDRESSABLE_VGPRS_PER_WF;
   case ROCJITSU_CODE_ARCH_RDNA1:
     return rdna1::Isa::MAX_VGPRS_PER_WF;
   case ROCJITSU_CODE_ARCH_RDNA2:
@@ -164,8 +181,6 @@ constexpr uint16_t kTtmpRdna4GridX = 9;
     return rdna3_5::Isa::MAX_VGPRS_PER_WF;
   case ROCJITSU_CODE_ARCH_RDNA4:
     return rdna4::Isa::MAX_VGPRS_PER_WF;
-  case ROCJITSU_CODE_ARCH_GFX1250:
-    return gfx1250::Isa::MAX_ADDRESSABLE_VGPRS_PER_WF;
   default:
     return 0;
   }
@@ -181,6 +196,8 @@ constexpr uint16_t kTtmpRdna4GridX = 9;
     return HasAccVgpr<cdna3::Isa>;
   case ROCJITSU_CODE_ARCH_CDNA4:
     return HasAccVgpr<cdna4::Isa>;
+  case ROCJITSU_CODE_ARCH_GFX1250:
+    return HasAccVgpr<gfx1250::Isa>;
   case ROCJITSU_CODE_ARCH_RDNA1:
     return HasAccVgpr<rdna1::Isa>;
   case ROCJITSU_CODE_ARCH_RDNA2:
@@ -191,8 +208,6 @@ constexpr uint16_t kTtmpRdna4GridX = 9;
     return HasAccVgpr<rdna3_5::Isa>;
   case ROCJITSU_CODE_ARCH_RDNA4:
     return HasAccVgpr<rdna4::Isa>;
-  case ROCJITSU_CODE_ARCH_GFX1250:
-    return HasAccVgpr<gfx1250::Isa>;
   default:
     return false;
   }
@@ -273,8 +288,9 @@ constexpr uint16_t kTtmpRdna4GridX = 9;
   return code_end - text_vaddr;
 }
 
-using KernelDescriptorVisitor = std::function<void(uint64_t descriptor_file_offset,
-                                                   uint64_t entry_text_offset, const KD &desc)>;
+using KernelDescriptorVisitor =
+    std::function<void(uint64_t descriptor_file_offset, uint64_t entry_text_offset,
+                       std::string_view symbol_name, const KD &desc)>;
 
 void visit_kernel_descriptors(std::span<const uint8_t> image, uint64_t text_offset,
                               uint64_t text_size, const KernelDescriptorVisitor &callback) {
@@ -339,7 +355,9 @@ void visit_kernel_descriptors(std::span<const uint8_t> image, uint64_t text_offs
         continue;
 
       const uint64_t entry_text_offset = entry_vaddr - *text_vaddr;
-      callback(file_off, entry_text_offset, *desc);
+      const char *name = strtab + symtab[j].st_name;
+      const size_t name_len = strnlen(name, strtab_size - symtab[j].st_name);
+      callback(file_off, entry_text_offset, std::string_view(name, name_len), *desc);
     }
   }
 }
@@ -355,6 +373,12 @@ void visit_kernel_descriptors(std::span<const uint8_t> image, uint64_t text_offs
   // CDNA kernels are Wave64 in the code objects currently translated here.
   if (is_cdna_arch(guest_arch))
     return 64;
+
+  // gfx1250 is GFX12-like for descriptor format, but unlike RDNA4 targets it
+  // is Wave32-only. Treat malformed descriptors that leave the RDNA wave32 bit
+  // clear as Wave32 rather than inventing unsupported Wave64 execution.
+  if (is_gfx1250_arch(guest_arch))
+    return 32;
 
   // RDNA descriptors opt into Wave32 with ENABLE_WAVEFRONT_SIZE32. If the bit is
   // clear, launch hardware interprets the descriptor as Wave64.
@@ -399,8 +423,6 @@ void visit_kernel_descriptors(std::span<const uint8_t> image, uint64_t text_offs
          arch == ROCJITSU_CODE_ARCH_CDNA4;
 }
 
-[[nodiscard]] bool uses_gfx10_plus_rsrc3(rj_code_arch_t arch) { return is_rdna_arch(arch); }
-
 [[nodiscard]] uint32_t descriptor_vgpr_granularity_for_wavefront(rj_code_arch_t arch,
                                                                  uint32_t wavefront_size) {
   // This is the AMDHSA kernel-descriptor encoding granularity for
@@ -410,6 +432,9 @@ void visit_kernel_descriptors(std::span<const uint8_t> image, uint64_t text_offs
   // 1536-VGPR/SIMD parts), while the AMDHSA descriptor table encodes
   // GFX10-GFX12 Wave64 as max(0, ceil(vgprs_used / 4) - 1).
   //
+  // gfx1250 is wave32-only and IREE gfx1250 HSACOs encode 263/276 VGPR kernel
+  // metadata as RSRC1 values 16/17, matching 16-register descriptor granules.
+  //
   // If/when occupancy modeling needs the physical allocation block size, add a
   // separate helper for that policy. Reusing this descriptor helper for
   // occupancy would mix two different hardware contracts.
@@ -417,8 +442,8 @@ void visit_kernel_descriptors(std::span<const uint8_t> image, uint64_t text_offs
     return 4;
   if (is_cdna_arch(arch))
     return 8;
-  if (arch == ROCJITSU_CODE_ARCH_GFX1250)
-    return wavefront_size == 32 ? 16 : 4;
+  if (is_gfx1250_arch(arch))
+    return 16;
   if (is_rdna_arch(arch))
     return wavefront_size == 32 ? 8 : 4;
   return 1;
@@ -433,6 +458,20 @@ void visit_kernel_descriptors(std::span<const uint8_t> image, uint64_t text_offs
   if (registers == 0)
     return 0;
   return (registers + granularity - 1) / granularity - 1;
+}
+
+[[nodiscard]] uint32_t max_vgpr_granulated_field(rj_code_arch_t arch, uint32_t wavefront_size) {
+  // gfx1201 accepts the GFX12 high-bank MODE bits, but launches hang when the
+  // descriptor VGPR field exceeds 31. Keep the semantic VGPR requirement in
+  // target_vgpr_count for diagnostics while capping the hardware launch field.
+  if (arch == ROCJITSU_CODE_ARCH_RDNA4 && wavefront_size == 32)
+    return 31;
+  return kMaxVgprGranulatedField;
+}
+
+[[nodiscard]] uint32_t align_up_register_count(uint32_t count, uint32_t alignment) {
+  alignment = std::max(alignment, 1u);
+  return ((count + alignment - 1u) / alignment) * alignment;
 }
 
 [[nodiscard]] uint16_t accum_vgpr_base(const KD &desc, rj_code_arch_t guest_arch) {
@@ -466,7 +505,8 @@ void append_salu_write(std::vector<uint32_t> &words, uint32_t word, rj_code_arch
 }
 
 void append_rdna4_workgroup_grid_prologue(std::vector<uint32_t> &words, const KD &desc,
-                                          rj_code_arch_t host_arch) {
+                                          rj_code_arch_t host_arch,
+                                          int16_t rdna4_grid_x_sgpr) {
   const uint16_t shift16 = scalar_positive_inline_u32(16);
   const int16_t sgpr_wg_id_x = workgroup_id_sgpr(desc, 0);
   const int16_t sgpr_wg_id_y = workgroup_id_sgpr(desc, 1);
@@ -475,6 +515,12 @@ void append_rdna4_workgroup_grid_prologue(std::vector<uint32_t> &words, const KD
   if (sgpr_wg_id_x >= 0) {
     append_salu_write(words,
                       build_s_mov_b32(static_cast<uint16_t>(sgpr_wg_id_x),
+                                      ttmp_scalar_operand(kTtmpRdna4GridX), host_arch),
+                      host_arch);
+  }
+  if (rdna4_grid_x_sgpr >= 0 && rdna4_grid_x_sgpr != sgpr_wg_id_x) {
+    append_salu_write(words,
+                      build_s_mov_b32(static_cast<uint16_t>(rdna4_grid_x_sgpr),
                                       ttmp_scalar_operand(kTtmpRdna4GridX), host_arch),
                       host_arch);
   }
@@ -500,27 +546,43 @@ void append_rdna4_workgroup_grid_prologue(std::vector<uint32_t> &words, const KD
   }
 }
 
+void append_rdna4_vgpr_msb_entry_reset(std::vector<uint32_t> &words) {
+  constexpr uint8_t kOpSSetregImm32B32 = 19;
+  constexpr uint8_t kHwregMode = 1;
+  constexpr uint8_t kVgprMsbModeSize = 8;
+  const uint16_t hwreg = build_hwreg(kHwregMode, amdgpu::VGPR_MSB_MODE_SHIFT, kVgprMsbModeSize);
+  words.push_back(build_sopk(kOpSSetregImm32B32, hwreg));
+  words.push_back(0);
+}
+
 [[nodiscard]] std::vector<uint32_t>
-build_kernel_entry_prologue(const KD &src, rj_code_arch_t guest_arch, rj_code_arch_t host_arch) {
+build_kernel_entry_prologue(const KD &src, rj_code_arch_t guest_arch, rj_code_arch_t host_arch,
+                            int16_t rdna4_grid_x_sgpr) {
   std::vector<uint32_t> words;
 
   // Kernel-entry register initialization ABI notes:
-  // - CDNA descriptors may request workgroup_id_x/y/z as SGPRs immediately
-  //   after the user-SGPR block. CDNA hardware initializes those SGPRs before
-  //   entering the kernel.
+  // - CDNA and gfx1250 descriptors may request workgroup_id_x/y/z as SGPRs
+  //   immediately after the user-SGPR block. Source hardware initializes those
+  //   SGPRs before entering the kernel.
+  // - GFX1250 hardware initializes VGPR_MSB mode to zero for a fresh kernel
+  //   wave. RDNA4 exposes the equivalent through MODE[19:12], which can persist
+  //   across translated dispatches unless each kernel resets it at entry.
   // - RDNA1-RDNA3 still have descriptor-controlled workgroup-id SGPR setup for
   //   the cases translated here, so no prologue is needed for those targets.
   // - RDNA4 provides the current workgroup-grid payload through TTMP registers
   //   instead: GridX in TTMP9, GridY in TTMP7[15:0], and GridZ in TTMP7[31:16].
-  //   When translating CDNA to RDNA4, materialize the guest-selected SGPRs from
-  //   that payload once at kernel entry so the instruction stream can keep using
-  //   the original CDNA SGPR numbering.
+  //   When translating CDNA or gfx1250 to RDNA4, materialize the guest-selected
+  //   SGPRs from that payload once at kernel entry so the instruction stream can
+  //   keep using the original guest SGPR numbering.
   // - Scratch/private-segment initialization is descriptor-driven today. If a
   //   future target needs SGPR-based scratch setup, it should be appended here
   //   and represented in KdTranslation::prologue_words, not hidden in the patcher.
-  if (is_cdna_arch(guest_arch) &&
-      (host_arch == ROCJITSU_CODE_ARCH_RDNA4 || host_arch == ROCJITSU_CODE_ARCH_GFX1250))
-    append_rdna4_workgroup_grid_prologue(words, src, host_arch);
+  if ((is_cdna_arch(guest_arch) &&
+       (host_arch == ROCJITSU_CODE_ARCH_RDNA4 || host_arch == ROCJITSU_CODE_ARCH_GFX1250)) ||
+      (is_gfx1250_arch(guest_arch) && host_arch == ROCJITSU_CODE_ARCH_RDNA4))
+    append_rdna4_workgroup_grid_prologue(words, src, host_arch, rdna4_grid_x_sgpr);
+  if (is_gfx1250_arch(guest_arch) && host_arch == ROCJITSU_CODE_ARCH_RDNA4)
+    append_rdna4_vgpr_msb_entry_reset(words);
 
   return words;
 }
@@ -552,11 +614,13 @@ void append_descriptor_error(KdTranslation &result, std::string message) {
 
 [[nodiscard]] KdTranslation
 translate_one_descriptor(rj_code_arch_t guest_arch, rj_code_arch_t host_arch,
-                         uint64_t descriptor_file_offset, uint64_t entry_text_offset, const KD &src,
+                         uint64_t descriptor_file_offset, uint64_t entry_text_offset,
+                         std::string_view symbol_name, const KD &src,
                          const KernelDescriptorTranslationOptions &options) {
   KdTranslation result;
   result.descriptor_file_offset = descriptor_file_offset;
   result.entry_text_offset = entry_text_offset;
+  result.symbol_name = std::string(symbol_name);
 
   // The source descriptor encodes the guest launch wave size. The target
   // descriptor must request a wave size the host can actually launch. We do not
@@ -580,11 +644,6 @@ translate_one_descriptor(rj_code_arch_t guest_arch, rj_code_arch_t host_arch,
   // reserved for those remapped accumulator registers.
   result.accvgpr_base = accum_vgpr_base(src, guest_arch);
   result.target_accvgpr_base = result.accvgpr_base;
-
-  // Descriptor ABI fixes that require instructions, not bitfield changes, are
-  // emitted as prologue words. CodeObjectPatcher decides where to place them and
-  // redirects the kernel descriptor entry point if this vector is non-empty.
-  result.prologue_words = build_kernel_entry_prologue(src, guest_arch, host_arch);
 
   // VGPR descriptor fields do not store raw register counts. They store
   // "granulated count", meaning (register_count / architecture_granularity) - 1
@@ -656,9 +715,17 @@ translate_one_descriptor(rj_code_arch_t guest_arch, rj_code_arch_t host_arch,
                             "not implemented for this descriptor");
   }
 
-  result.target_vgpr_granulated = clamp_granulated(
-      register_count_to_granulated(required_vgpr_allocation, host_vgpr_granularity),
-      kMaxVgprGranulatedField, result, "GRANULATED_WORKITEM_VGPR_COUNT");
+  const uint32_t target_vgpr_granulated =
+      register_count_to_granulated(required_vgpr_allocation, host_vgpr_granularity);
+  const uint32_t max_target_vgpr_granulated =
+      max_vgpr_granulated_field(host_arch, result.host_wavefront_size);
+  if (host_arch == ROCJITSU_CODE_ARCH_RDNA4 && result.host_wavefront_size == 32) {
+    result.target_vgpr_granulated = std::min(target_vgpr_granulated, max_target_vgpr_granulated);
+  } else {
+    result.target_vgpr_granulated =
+        clamp_granulated(target_vgpr_granulated, max_target_vgpr_granulated, result,
+                         "GRANULATED_WORKITEM_VGPR_COUNT");
+  }
 
   // SGPR counts are also stored as a granulated value, but the descriptor
   // granularity is fixed at eight SGPRs for the architectures handled here.
@@ -668,7 +735,30 @@ translate_one_descriptor(rj_code_arch_t guest_arch, rj_code_arch_t host_arch,
   const uint32_t guest_sgpr_granulated =
       AMDHSA_BITS_GET(src.compute_pgm_rsrc1, kd::COMPUTE_PGM_RSRC1_GRANULATED_WAVEFRONT_SGPR_COUNT);
   result.guest_sgpr_count = granulated_count_to_registers(guest_sgpr_granulated, 8);
-  result.host_sgpr_count = std::max(result.guest_sgpr_count, options.minimum_sgprs);
+  uint32_t abi_sgpr_floor = user_sgpr_count(src);
+  for (uint32_t dim = 0; dim < 3; ++dim) {
+    if (const int16_t wg_id_sgpr = workgroup_id_sgpr(src, dim); wg_id_sgpr >= 0)
+      abi_sgpr_floor = std::max(abi_sgpr_floor, static_cast<uint32_t>(wg_id_sgpr) + 1u);
+  }
+  result.target_abi_sgpr_count = abi_sgpr_floor;
+  result.host_sgpr_count =
+      std::max({result.guest_sgpr_count, options.minimum_sgprs, abi_sgpr_floor});
+  result.target_source_sgpr_count = result.host_sgpr_count;
+  if (is_gfx1250_arch(guest_arch) && host_arch == ROCJITSU_CODE_ARCH_RDNA4) {
+    if (result.host_sgpr_count < arch_max_sgprs(host_arch)) {
+      result.rdna4_grid_x_sgpr = static_cast<int16_t>(result.host_sgpr_count);
+      ++result.host_sgpr_count;
+    } else {
+      append_descriptor_error(result,
+                              "required SGPR count leaves no room for RDNA4 grid-x capture SGPR");
+    }
+    constexpr uint32_t kScratchSgprs = 8;
+    const uint32_t kScratchSgprLimit = arch_max_sgprs(host_arch);
+    const uint32_t scratch_base = align_up_register_count(result.host_sgpr_count, 2);
+    result.host_sgpr_count =
+        std::max(result.host_sgpr_count,
+                 std::min(kScratchSgprLimit, scratch_base + kScratchSgprs));
+  }
   result.target_sgpr_count = result.host_sgpr_count;
   if (arch_max_sgprs(host_arch) != 0 && result.host_sgpr_count > arch_max_sgprs(host_arch)) {
     append_descriptor_error(result, "required SGPR count exceeds target limit; spill tiers are not "
@@ -683,17 +773,50 @@ translate_one_descriptor(rj_code_arch_t guest_arch, rj_code_arch_t host_arch,
   }
 
   // LDS/private sizes are copied from the source descriptor and extended by
-  // explicit lowering addends. Spill-zone allocation and Zorua-style LDS
-  // overflow are represented in KdTranslation but are not implemented yet.
-  result.target_private_size =
-      src.private_segment_fixed_size + options.private_segment_fixed_size_addend;
+  // explicit lowering addends. The addend ranges are exposed to semantic
+  // lowerings as spill zones.
+  result.target_private_size = src.private_segment_fixed_size;
+  if (options.private_segment_fixed_size_addend != 0) {
+    result.private_spill_zone_base = (src.private_segment_fixed_size + 3u) & ~3u;
+    result.private_spill_zone_bytes = options.private_segment_fixed_size_addend;
+    result.target_private_size =
+        result.private_spill_zone_base + options.private_segment_fixed_size_addend;
+  }
   result.target_lds_size = src.group_segment_fixed_size + options.group_segment_fixed_size_addend;
+  if (options.group_segment_fixed_size_addend != 0) {
+    result.lds_spill_zone_base = src.group_segment_fixed_size;
+    result.lds_spill_zone_bytes = options.group_segment_fixed_size_addend;
+  }
 
   // The fixed user-SGPR prefix is preserved. Workgroup-id SGPRs are derived
   // separately from the enable bits because they are allocated immediately after
   // this prefix and are not included in USER_SGPR_COUNT.
   result.target_user_sgpr_count = user_sgpr_count(src);
+
+  // Descriptor ABI fixes that require instructions, not bitfield changes, are
+  // emitted as prologue words. CodeObjectPatcher decides where to place them and
+  // redirects the kernel descriptor entry point if this vector is non-empty.
+  result.prologue_words =
+      build_kernel_entry_prologue(src, guest_arch, host_arch, result.rdna4_grid_x_sgpr);
   return result;
+}
+
+[[nodiscard]] KernelDescriptorTranslationOptions
+options_for_entry(const KernelDescriptorTranslationOptions &options, uint64_t entry_text_offset) {
+  KernelDescriptorTranslationOptions entry_options = options;
+  for (const KernelDescriptorResourceOverride &override : options.kernel_overrides) {
+    if (override.entry_text_offset != entry_text_offset)
+      continue;
+    entry_options.minimum_vgprs = std::max(entry_options.minimum_vgprs, override.minimum_vgprs);
+    entry_options.minimum_sgprs = std::max(entry_options.minimum_sgprs, override.minimum_sgprs);
+    entry_options.group_segment_fixed_size_addend = std::max(
+        entry_options.group_segment_fixed_size_addend, override.group_segment_fixed_size_addend);
+    entry_options.private_segment_fixed_size_addend =
+        std::max(entry_options.private_segment_fixed_size_addend,
+                 override.private_segment_fixed_size_addend);
+  }
+  entry_options.kernel_overrides = {};
+  return entry_options;
 }
 
 } // namespace
@@ -709,11 +832,13 @@ std::vector<KdTranslation> KernelDescriptorTranslator::translate_image(
 
   visit_kernel_descriptors(
       image, text_offset, text_size,
-      [&](uint64_t descriptor_file_offset, uint64_t entry_text_offset, const KD &src) {
+      [&](uint64_t descriptor_file_offset, uint64_t entry_text_offset,
+          std::string_view symbol_name, const KD &src) {
         KD desc{};
         std::memcpy(&desc, &src, sizeof(desc));
         translations.push_back(translate_one_descriptor(
-            guest_arch_, host_arch_, descriptor_file_offset, entry_text_offset, desc, options));
+            guest_arch_, host_arch_, descriptor_file_offset, entry_text_offset, symbol_name, desc,
+            options_for_entry(options, entry_text_offset)));
       });
 
   return translations;
@@ -728,7 +853,7 @@ std::optional<KdTranslation> KernelDescriptorTranslator::translate_descriptor(
   KD desc{};
   std::memcpy(&desc, image.data() + descriptor_file_offset, sizeof(desc));
   return translate_one_descriptor(guest_arch_, host_arch_, descriptor_file_offset,
-                                  entry_text_offset, desc, options);
+                                  entry_text_offset, {}, desc, options);
 }
 
 } // namespace rocjitsu

@@ -24,6 +24,7 @@ RJ_DIAGNOSTIC_POP
 #include <optional>
 // Standard library
 #include <span>
+#include <string>
 #include <string_view>
 #include <unordered_set>
 #include <vector>
@@ -211,6 +212,109 @@ void insert_file_bytes(std::vector<uint8_t> &image, Elf64_Ehdr &ehdr,
 [[nodiscard]] bool image_contains_range(size_t image_size, uint64_t file_offset, uint64_t size) {
   const uint64_t limit = static_cast<uint64_t>(image_size);
   return file_offset <= limit && size <= limit - file_offset;
+}
+
+bool patch_msgpack_uint(std::vector<uint8_t> &image, size_t offset, uint32_t value) {
+  if (offset >= image.size())
+    return false;
+  const uint8_t tag = image[offset];
+  if (tag <= 0x7Fu) {
+    if (value > 0x7Fu)
+      return false;
+    image[offset] = static_cast<uint8_t>(value);
+    return true;
+  }
+  if (tag == 0xCCu) {
+    if (value > 0xFFu || !image_contains_range(image.size(), offset + 1, 1))
+      return false;
+    image[offset + 1] = static_cast<uint8_t>(value);
+    return true;
+  }
+  if (tag == 0xCDu) {
+    if (value > 0xFFFFu || !image_contains_range(image.size(), offset + 1, 2))
+      return false;
+    image[offset + 1] = static_cast<uint8_t>((value >> 8) & 0xFFu);
+    image[offset + 2] = static_cast<uint8_t>(value & 0xFFu);
+    return true;
+  }
+  if (tag == 0xCEu) {
+    if (!image_contains_range(image.size(), offset + 1, 4))
+      return false;
+    image[offset + 1] = static_cast<uint8_t>((value >> 24) & 0xFFu);
+    image[offset + 2] = static_cast<uint8_t>((value >> 16) & 0xFFu);
+    image[offset + 3] = static_cast<uint8_t>((value >> 8) & 0xFFu);
+    image[offset + 4] = static_cast<uint8_t>(value & 0xFFu);
+    return true;
+  }
+  return false;
+}
+
+std::optional<uint32_t> read_msgpack_uint(std::span<const uint8_t> image, size_t offset) {
+  if (offset >= image.size())
+    return std::nullopt;
+  const uint8_t tag = image[offset];
+  if (tag <= 0x7Fu)
+    return tag;
+  if (tag == 0xCCu) {
+    if (!image_contains_range(image.size(), offset + 1, 1))
+      return std::nullopt;
+    return image[offset + 1];
+  }
+  if (tag == 0xCDu) {
+    if (!image_contains_range(image.size(), offset + 1, 2))
+      return std::nullopt;
+    return (static_cast<uint32_t>(image[offset + 1]) << 8) |
+           static_cast<uint32_t>(image[offset + 2]);
+  }
+  if (tag == 0xCEu) {
+    if (!image_contains_range(image.size(), offset + 1, 4))
+      return std::nullopt;
+    return (static_cast<uint32_t>(image[offset + 1]) << 24) |
+           (static_cast<uint32_t>(image[offset + 2]) << 16) |
+           (static_cast<uint32_t>(image[offset + 3]) << 8) |
+           static_cast<uint32_t>(image[offset + 4]);
+  }
+  return std::nullopt;
+}
+
+std::optional<std::pair<std::string_view, size_t>>
+read_msgpack_string(std::span<const uint8_t> image, size_t offset) {
+  if (offset >= image.size())
+    return std::nullopt;
+
+  const uint8_t tag = image[offset];
+  size_t length = 0;
+  size_t data_offset = offset + 1;
+  if ((tag & 0xE0u) == 0xA0u) {
+    length = tag & 0x1Fu;
+  } else if (tag == 0xD9u) {
+    if (!image_contains_range(image.size(), offset + 1, 1))
+      return std::nullopt;
+    length = image[offset + 1];
+    data_offset = offset + 2;
+  } else if (tag == 0xDAu) {
+    if (!image_contains_range(image.size(), offset + 1, 2))
+      return std::nullopt;
+    length = (static_cast<size_t>(image[offset + 1]) << 8) |
+             static_cast<size_t>(image[offset + 2]);
+    data_offset = offset + 3;
+  } else if (tag == 0xDBu) {
+    if (!image_contains_range(image.size(), offset + 1, 4))
+      return std::nullopt;
+    length = (static_cast<size_t>(image[offset + 1]) << 24) |
+             (static_cast<size_t>(image[offset + 2]) << 16) |
+             (static_cast<size_t>(image[offset + 3]) << 8) |
+             static_cast<size_t>(image[offset + 4]);
+    data_offset = offset + 5;
+  } else {
+    return std::nullopt;
+  }
+
+  if (!image_contains_range(image.size(), data_offset, length))
+    return std::nullopt;
+  return std::pair{
+      std::string_view(reinterpret_cast<const char *>(image.data() + data_offset), length),
+      data_offset + length};
 }
 
 void shift_symbols_in_moved_sections(std::vector<uint8_t> &image, const Elf64_Ehdr &ehdr,
@@ -446,6 +550,120 @@ bool CodeObjectPatcher::patch_kernel_descriptor(uint64_t file_offset,
 
   std::memcpy(image_.data() + file_offset, descriptor.data(), descriptor.size());
   return true;
+}
+
+bool CodeObjectPatcher::patch_metadata_vgpr_count(uint32_t vgpr_count) {
+  static constexpr std::array<uint8_t, 12> kVgprCountKey = {0xAB, '.', 'v', 'g', 'p', 'r',
+                                                            '_',  'c', 'o', 'u', 'n', 't'};
+
+  bool patched_any = false;
+  auto search_start = image_.begin();
+  while (true) {
+    const auto it =
+        std::search(search_start, image_.end(), kVgprCountKey.begin(), kVgprCountKey.end());
+    if (it == image_.end())
+      return true;
+
+    const size_t key_offset = static_cast<size_t>(std::distance(image_.begin(), it));
+    if (!patch_msgpack_uint(image_, key_offset + kVgprCountKey.size(), vgpr_count))
+      return false;
+    patched_any = true;
+    search_start = it + kVgprCountKey.size();
+  }
+  return patched_any;
+}
+
+bool CodeObjectPatcher::patch_metadata_private_segment_fixed_sizes(
+    std::span<const KdTranslation> translations) {
+  static constexpr std::array<uint8_t, 28> kPrivateSizeKey = {
+      0xBB, '.', 'p', 'r', 'i', 'v', 'a', 't', 'e', '_', 's', 'e', 'g', 'm',
+      'e',  'n', 't', '_', 'f', 'i', 'x', 'e', 'd', '_', 's', 'i', 'z', 'e'};
+  static constexpr std::array<uint8_t, 8> kSymbolKey = {0xA7, '.', 's', 'y',
+                                                        'm',  'b', 'o', 'l'};
+
+  struct Patch {
+    std::string_view symbol_name;
+    uint32_t current_size = 0;
+    uint32_t target_size = 0;
+  };
+  std::vector<Patch> pending;
+  pending.reserve(translations.size());
+  for (const KdTranslation &translation : translations) {
+    if (translation.private_spill_zone_bytes == 0)
+      continue;
+    if (translation.symbol_name.empty())
+      return false;
+    pending.push_back({translation.symbol_name, translation.private_spill_zone_base,
+                       translation.target_private_size});
+  }
+  if (pending.empty())
+    return true;
+
+  auto search_start = image_.begin();
+  bool saw_key = false;
+  struct PrivateCandidate {
+    size_t value_offset = 0;
+    uint32_t current_size = 0;
+  };
+  std::optional<PrivateCandidate> pending_private;
+  std::optional<std::string_view> pending_symbol;
+  const auto apply_patch_for_symbol = [&](std::string_view symbol,
+                                          const PrivateCandidate &candidate) -> bool {
+    auto pending_it = std::ranges::find_if(
+        pending, [&](const Patch &patch) { return patch.symbol_name == symbol; });
+    if (pending_it == pending.end())
+      return true;
+    if (pending_it->current_size != candidate.current_size)
+      return false;
+    if (!patch_msgpack_uint(image_, candidate.value_offset, pending_it->target_size))
+      return false;
+    pending.erase(pending_it);
+    return true;
+  };
+
+  while (true) {
+    const auto private_it =
+        std::search(search_start, image_.end(), kPrivateSizeKey.begin(), kPrivateSizeKey.end());
+    const auto symbol_it =
+        std::search(search_start, image_.end(), kSymbolKey.begin(), kSymbolKey.end());
+    if (private_it == image_.end() && symbol_it == image_.end())
+      return !saw_key || pending.empty();
+
+    saw_key = true;
+    const bool use_private =
+        private_it != image_.end() && (symbol_it == image_.end() || private_it < symbol_it);
+    if (use_private) {
+      const size_t key_offset = static_cast<size_t>(std::distance(image_.begin(), private_it));
+      const size_t value_offset = key_offset + kPrivateSizeKey.size();
+      const auto current_value = read_msgpack_uint(image_, value_offset);
+      if (!current_value)
+        return false;
+      PrivateCandidate candidate{value_offset, *current_value};
+      if (pending_symbol) {
+        if (!apply_patch_for_symbol(*pending_symbol, candidate))
+          return false;
+        pending_symbol.reset();
+      } else {
+        pending_private = candidate;
+      }
+      search_start = private_it + kPrivateSizeKey.size();
+      continue;
+    }
+
+    const size_t key_offset = static_cast<size_t>(std::distance(image_.begin(), symbol_it));
+    const size_t value_offset = key_offset + kSymbolKey.size();
+    const auto symbol = read_msgpack_string(image_, value_offset);
+    if (!symbol)
+      return false;
+    if (pending_private) {
+      if (!apply_patch_for_symbol(symbol->first, *pending_private))
+        return false;
+      pending_private.reset();
+    } else {
+      pending_symbol = symbol->first;
+    }
+    search_start = symbol_it + kSymbolKey.size();
+  }
 }
 
 bool CodeObjectPatcher::apply_kernel_descriptor_translation(const KdTranslation &translation,

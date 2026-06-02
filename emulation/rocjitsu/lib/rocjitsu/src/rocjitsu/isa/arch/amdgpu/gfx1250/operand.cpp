@@ -37,6 +37,12 @@ Operand::Operand(int size_bits, OperandType opr_type, uint64_t literal64_value, 
   is_vgpr_ = is_vgpr_operand_type(opr_type);
 }
 
+std::optional<uint64_t> Operand::literal64_value() const {
+  if (!has_literal64_)
+    return std::nullopt;
+  return literal64_value_;
+}
+
 std::string Operand::name() const {
   if (has_literal64_)
     return std::format("0x{:x}", literal64_value_);

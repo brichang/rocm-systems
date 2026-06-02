@@ -1569,6 +1569,23 @@ TEST(MfmaExecTest, WmmaInputLocF16_16x16x32) {
   EXPECT_EQ(first_high_half.sub_element, 0u);
 }
 
+TEST(MfmaExecTest, WmmaInputLocF16K32IsNotTwoK16Chunks) {
+  // gfx1250 WMMA is wave32-only. A K=32 operand is not laid out as two
+  // register-contiguous K=16 operands, so DBT cannot lower it by simply
+  // issuing two smaller WMMA instructions against incremented VGPR bases.
+  auto k32_k8 = amdgpu::wmma_input_loc(16, 32, /*i=*/0, /*k=*/8, 16);
+  auto k16_k8 = amdgpu::wmma_input_loc(16, 16, /*i=*/0, /*k=*/8, 16);
+  EXPECT_EQ(k32_k8.vgpr_offset, 4u);
+  EXPECT_EQ(k32_k8.lane, 0u);
+  EXPECT_EQ(k16_k8.vgpr_offset, 0u);
+  EXPECT_EQ(k16_k8.lane, 16u);
+
+  auto k32_k16 = amdgpu::wmma_input_loc(16, 32, /*i=*/0, /*k=*/16, 16);
+  auto second_k16_k0 = amdgpu::wmma_input_loc(16, 16, /*i=*/0, /*k=*/0, 16);
+  EXPECT_EQ(k32_k16.vgpr_offset, second_k16_k0.vgpr_offset);
+  EXPECT_NE(k32_k16.lane, second_k16_k0.lane);
+}
+
 TEST(MfmaExecTest, WmmaInputLocF4_32x16x128) {
   auto a_last = amdgpu::wmma_input_loc(32, 128, /*i=*/31, /*k=*/127, 4);
   EXPECT_EQ(a_last.vgpr_offset, 15u);

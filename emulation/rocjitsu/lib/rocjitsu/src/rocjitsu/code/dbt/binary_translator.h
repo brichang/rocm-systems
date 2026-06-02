@@ -28,10 +28,12 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "rocjitsu/code/dbt/encoding_translator.h"
 #include "rocjitsu/code/dbt/translation_diagnostic.h"
+#include "rocjitsu/code/instruction_list.h"
 #include "rocjitsu/code/rj_code.h"
 
 namespace rocjitsu {
@@ -115,9 +117,10 @@ struct BinaryTranslatorOptions {
 
 /// @brief Result of translating a code object.
 struct TranslatedCodeObject {
-  std::vector<uint8_t> elf_bytes;                        ///< Translated ELF for the host ISA.
-  rj_code_arch_t host_arch = ROCJITSU_CODE_ARCH_INVALID; ///< Host ISA architecture.
-  std::vector<TranslationDiagnostic> diagnostics;        ///< Translation warnings/errors.
+  std::vector<uint8_t> elf_bytes;                         ///< Translated ELF for the host ISA.
+  rj_code_arch_t host_arch = ROCJITSU_CODE_ARCH_INVALID;  ///< Host ISA architecture.
+  std::vector<std::string> warnings;                      ///< Non-fatal translation warnings.
+  std::vector<TranslationDiagnostic> diagnostics;         ///< Structured translation diagnostics.
 
   [[nodiscard]] bool ok() const { return !has_error_diagnostic(diagnostics); }
 };
@@ -130,10 +133,11 @@ struct TranslatedCodeObject {
 ///   3. Translating remaining instructions via legalization + encoding translate.
 ///   4. Re-emitting a valid ELF for host_arch via CodeObjectPatcher.
 ///
-/// Because every in-place replacement preserves the original instruction's size
-/// (same-size for Identity/Substitute/Lower; branch stub for code caves),
-/// no instruction in .text ever shifts. Branch offsets remain valid — no global
-/// branch fixup pass is required.
+/// The default path preserves original .text instruction addresses by writing
+/// same-size replacements in place or by branching to code caves. For large
+/// kernels where dense size-growing replacements cannot reach a cave, the
+/// translator may instead append a fully translated executable copy and redirect
+/// kernel descriptors to that copy after fixing direct branch offsets.
 class BinaryTranslator {
 public:
   /// @brief Construct a translator for the given (guest, host) ISA pair.
@@ -158,16 +162,24 @@ private:
   ///
   /// @details If the replacement fits within the source byte range, writes
   /// in-place and pads any leftover source words. If it expands, writes a
-  /// branch stub in-place and appends the replacement body + return branch to
-  /// the .rj_translations code cave via the patcher.
+  /// branch stub in-place and writes the replacement body + return branch to a
+  /// nearby local cave when possible, otherwise appends it to .rj_translations.
   ///
   /// @param repl    The semantic replacement to apply.
   /// @param text    The translated text buffer (same size as original .text).
   /// @param patcher The code object patcher for cave body accumulation.
+  /// @param local_caves Ranges in .text already reserved for local cave bodies.
+  /// @param protected_ranges Decoded reachable code ranges that must not be
+  ///                         repurposed as local caves.
+  /// @param allow_unreachable_text_caves Whether decoded-unreachable, non-padding
+  ///                                     text may be repurposed for cave bodies.
   /// @returns true if the replacement was applied safely; false if an expanding
   ///          replacement could not be branched to/from the code cave.
   [[nodiscard]] bool apply_semantic(const struct SemanticReplacement &repl,
-                                    std::vector<uint8_t> &text, CodeObjectPatcher &patcher);
+                                    std::vector<uint8_t> &text, CodeObjectPatcher &patcher,
+                                    std::vector<std::pair<uint64_t, uint64_t>> &local_caves,
+                                    std::span<const std::pair<uint64_t, uint64_t>> protected_ranges,
+                                    bool allow_unreachable_text_caves);
 
   /// @brief Translate a single instruction via the encoding translation pipeline.
   ///
@@ -181,13 +193,34 @@ private:
   /// @param dst_opcode Target opcode from the legalization table.
   /// @param patcher    The code object patcher for expanded instruction bodies.
   /// @param orig_text   The original .text bytes used to preserve trailing literals.
+  /// @param local_caves Ranges in .text already reserved for local cave bodies.
+  /// @param protected_ranges Decoded reachable code ranges that must not be
+  ///                         repurposed as local caves.
+  /// @param allow_unreachable_text_caves Whether decoded-unreachable, non-padding
+  ///                                     text may be repurposed for cave bodies.
+  /// @param rdna4_grid_x_sgpr SGPR holding the entry-captured RDNA4 GridX value,
+  ///                          or -1 when no remap is needed.
   /// @returns true if the instruction was translated or copied safely; false if
   ///          the translated encoding expanded and could not be branched through
   ///          the code cave.
-  [[nodiscard]] bool handle_encoding(const Instruction &inst, uint64_t offset,
-                                     std::vector<uint8_t> &text, uint16_t dst_opcode,
-                                     CodeObjectPatcher &patcher, std::span<const uint8_t> orig_text,
-                                     const InstructionLegalization *leg);
+  [[nodiscard]] bool
+  handle_encoding(const Instruction &inst, uint64_t offset, std::vector<uint8_t> &text,
+                  uint16_t dst_opcode, CodeObjectPatcher &patcher,
+                  std::span<const uint8_t> orig_text,
+                  std::vector<std::pair<uint64_t, uint64_t>> &local_caves,
+                  std::span<const std::pair<uint64_t, uint64_t>> protected_ranges,
+                  bool allow_unreachable_text_caves, int16_t rdna4_grid_x_sgpr,
+                  InstructionList::Iterator block_begin, InstructionList::Iterator inst_it);
+
+  /// @brief Translate one instruction to host instruction words.
+  ///
+  /// @details Used by the expanded-copy path where size-growing replacements
+  /// can be emitted inline and later direct-branch fixups rewrite the copied
+  /// branch immediates.
+  [[nodiscard]] std::vector<uint32_t>
+  translate_instruction_words(const Instruction &inst, uint64_t offset,
+                              const class LivenessAnalysis &liveness,
+                              std::span<const uint8_t> orig_text, int16_t rdna4_grid_x_sgpr);
 
   rj_code_arch_t guest_arch_;                               ///< Source ISA.
   rj_code_arch_t host_arch_;                                ///< Target ISA.
@@ -197,7 +230,8 @@ private:
   EncodingTranslateFn encoding_translate_;                  ///< Per-pair encoding translator.
   LegalizationLookupFn legalization_lookup_;                ///< Per-pair legalization table.
   std::unique_ptr<SemanticTranslator> semantic_translator_; ///< Per-pair semantic rule engine.
-  std::vector<TranslationDiagnostic> *diagnostics_ = nullptr; ///< Active result diagnostics.
+  std::vector<std::string> *warnings_ = nullptr;            ///< Active result warnings.
+  std::vector<TranslationDiagnostic> *diagnostics_ = nullptr; ///< Active structured diagnostics.
 };
 
 } // namespace rocjitsu

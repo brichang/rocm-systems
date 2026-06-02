@@ -32,6 +32,22 @@ public:
 
   void update_elf_flags(uint32_t new_flags);
 
+  /// @brief Raise AMDGPU metadata `.vgpr_count` entries in-place when possible.
+  ///
+  /// AMDHSA loaders may use the PT_NOTE metadata resource counts in addition to
+  /// the kernel descriptor fields. This helper patches compact msgpack integer
+  /// values without resizing the note payload.
+  [[nodiscard]] bool patch_metadata_vgpr_count(uint32_t vgpr_count);
+
+  /// @brief Patch AMDGPU metadata `.private_segment_fixed_size` entries.
+  ///
+  /// Values are patched by matching each metadata `.symbol` entry to its kernel
+  /// descriptor symbol. The compact msgpack integer width must already be large
+  /// enough for the new value; the patcher deliberately avoids resizing PT_NOTE
+  /// payloads.
+  [[nodiscard]] bool
+  patch_metadata_private_segment_fixed_sizes(std::span<const KdTranslation> translations);
+
   [[nodiscard]] bool patch_kernel_descriptor(uint64_t file_offset,
                                              std::span<const uint8_t> descriptor);
 

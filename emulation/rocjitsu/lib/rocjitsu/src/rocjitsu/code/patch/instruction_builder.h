@@ -31,6 +31,13 @@ inline constexpr uint32_t kSop1EncodingPrefix = 0x17D;
 inline constexpr uint32_t kSop2EncodingPrefix = 0x2;
 inline constexpr uint16_t kScalarPositiveInlineBase = 128;
 inline constexpr uint16_t kDelayAluSaluDep1 = 9;
+inline constexpr uint16_t kWaitAluDepctrVaSdst0 = 0xF19F;
+inline constexpr uint16_t kWaitAluDepctrVaVdst0 = 0x0F9F;
+inline constexpr uint16_t kWaitAluDepctrVaVcc0 = 0xFF9D;
+inline constexpr uint16_t kWaitAluDepctrVmVsrc0 = 0xFF83;
+inline constexpr uint16_t kWaitAluDepctrVaVdstVmVsrc0 =
+    kWaitAluDepctrVaVdst0 & kWaitAluDepctrVmVsrc0;
+inline constexpr uint16_t kWaitAluDepctrSaSdst0 = 0xFF9E;
 
 /// @brief Pack a SOPP instruction word from its constituent fields.
 ///
@@ -133,6 +140,12 @@ build_s_nop(uint16_t cycles = 0, rj_code_arch_t arch = ROCJITSU_CODE_ARCH_RDNA4)
 [[nodiscard]] inline constexpr uint32_t build_s_delay_alu(uint16_t simm16, rj_code_arch_t) {
   constexpr uint8_t kSoppDelayAlu = 7;
   return pack_sopp(kSoppDelayAlu, simm16);
+}
+
+/// @brief Encode s_wait_alu for the given target ISA.
+[[nodiscard]] inline constexpr uint32_t build_s_wait_alu(uint16_t simm16, rj_code_arch_t) {
+  constexpr uint8_t kSoppWaitAlu = 8;
+  return pack_sopp(kSoppWaitAlu, simm16);
 }
 
 /// @brief Encode s_mov_b32 for the given target ISA.
