@@ -194,6 +194,7 @@ jobs:
           REGISTRY_URL: ghcr.io/${{ github.repository_owner }}
           CHANGED_DOCKERFILE: ${{ steps.ci-flags.outputs.changed_dockerfile }}
           FULL_CI_IMAGES_MATRIX: ${{ steps.matrices.outputs.full_CI_images_matrix }}
+          NIGHTLY_BUILD: ${{ steps.nightly.outputs.nightly_build }}
         run: |
           if [ "${CHANGED_DOCKERFILE}" = "1" ]; then
             # sanitize ref for tag
@@ -208,10 +209,17 @@ jobs:
           # here. Partial-axis include rows produce malformed image URLs
           # (e.g. "...:latest-rocm" with no version); the resulting docker
           # pull failure surfaces the malformed include to the maintainer.
+          #
+          # Nightly: the version axis is the literal "nightly". The image tag
+          # carries the resolved YYYYMMDD-XXX build id for diagnosability
+          # (e.g. :latest-rocm-nightly-20260602-26796279962), while the cache
+          # ref stays floating (:latest-rocm-nightly-cache) so successive
+          # nightly builds share cache layers.
           ci_images=$(
             jq -c -n \
               --arg registry "${REGISTRY_URL}" \
               --arg tag "$tag" \
+              --arg nightly_build "${NIGHTLY_BUILD}" \
               --argjson build_matrix "${FULL_CI_IMAGES_MATRIX}" \
               '
                 $build_matrix.include
@@ -221,11 +229,19 @@ jobs:
                     {}; . + {
                       ($combo.platform + "-" + $combo.version): (
                         ( $combo
+                          # Versions concatenate after the "rocm" prefix without
+                          # a separator ("latest-rocm7.2.2"). For nightly, insert
+                          # a hyphen so the tag reads "latest-rocm-nightly[-BUILD]"
+                          # rather than "latest-rocmnightly".
+                          | .version_for_tag = (if .version == "nightly" then "-nightly" else .version end)
+                          | .build_suffix    = (if .version == "nightly" and ($nightly_build | length) > 0
+                                                then "-" + $nightly_build
+                                                else "" end)
                           | .image_name    = ($registry + "/hipfile/ais_ci_" + .platform)
-                          | .image         = (.image_name + ":" + $tag + .version)
-                          | .cache         = (.image_name + ":latest-rocm" + .version + "-cache")
-                          | .image_nvidia  = (.image_name + ":" + $tag + .version + "-nvidia")
-                          | .cache_nvidia  = (.image_name + ":latest-rocm" + .version + "-nvidia-cache")
+                          | .image         = (.image_name + ":" + $tag + .version_for_tag + .build_suffix)
+                          | .cache         = (.image_name + ":latest-rocm" + .version_for_tag + "-cache")
+                          | .image_nvidia  = (.image_name + ":" + $tag + .version_for_tag + .build_suffix + "-nvidia")
+                          | .cache_nvidia  = (.image_name + ":latest-rocm" + .version_for_tag + "-nvidia-cache")
                         ) | {
                           ci_image:              (.image        | ascii_downcase),
                           ci_image_cache:        (.cache        | ascii_downcase),
