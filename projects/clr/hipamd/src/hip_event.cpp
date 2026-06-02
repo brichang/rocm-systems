@@ -454,7 +454,20 @@ hipError_t hipEventRecord_common(hipEvent_t event, hipStream_t stream, uint32_t 
   if (e->deviceId() != hip_stream->DeviceId()) {
     return hipErrorInvalidResourceHandle;
   }
-  return e->addMarker(hip_stream, nullptr, !hip::Event::kBatchFlush);
+
+  // Coalesce consecutive records on the same event
+  const auto last_packet = hip_stream->GetLastPacket();
+  if (last_packet.type == hip::Stream::LastPacket::BARRIER &&
+      last_packet.barrier_event == event &&
+      !e->WasSyncedSinceLastRecord()) {
+    return hipSuccess;
+  }
+
+  hipError_t result = e->addMarker(hip_stream, nullptr, !hip::Event::kBatchFlush);
+  if (result == hipSuccess) {
+    hip_stream->SetLastPacketBarrier(event);
+  }
+  return result;
 }
 
 // ================================================================================================
@@ -535,6 +548,8 @@ hipError_t hipEventSynchronize(hipEvent_t event) {
 
   auto* e = reinterpret_cast<hip::Event*>(event);
   const auto status = e->synchronize();
+  // Mark event as synced to prevent coalescing until next record
+  e->MarkSynced();
   // Release freed memory for all memory pools on the device
   g_devices[e->deviceId()]->ReleaseFreedMemory();
   HIP_RETURN(status);

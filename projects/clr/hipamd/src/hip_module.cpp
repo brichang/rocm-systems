@@ -557,6 +557,11 @@ hipError_t ihipModuleLaunchKernel(hipFunction_t f, amd::LaunchParams& launch_par
     return hipErrorIllegalState;
   }
 
+  // Mark kernel dispatch on the stream
+  if (hip_stream != nullptr) {
+    hip_stream->SetLastPacketKernel();
+  }
+
   command->release();
 
   return hipSuccess;

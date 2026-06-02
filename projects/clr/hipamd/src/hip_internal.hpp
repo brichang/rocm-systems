@@ -435,6 +435,36 @@ namespace hip {
     /// Remove a parallel capture stream
     void EraseParallelCaptureStream(hipStream_t s) { parallelCaptureStreams_.erase(s); }
 
+    /// Tracks the last packet type dispatched on this stream (for event record coalescing)
+    struct LastPacket {
+      enum Type : uint8_t { NONE, BARRIER, KERNEL, MEMCPY, MEMSET };
+      Type type = NONE;
+      hipEvent_t barrier_event = nullptr;  //!< Only valid when type == BARRIER
+    };
+
+    /// Get last packet info (for coalescing check)
+    const LastPacket& GetLastPacket() const { return last_packet_; }
+    /// Set last packet as a barrier for the given event
+    void SetLastPacketBarrier(hipEvent_t e) {
+      last_packet_.type = LastPacket::BARRIER;
+      last_packet_.barrier_event = e;
+    }
+    /// Set last packet as kernel dispatch
+    void SetLastPacketKernel() {
+      last_packet_.type = LastPacket::KERNEL;
+      last_packet_.barrier_event = nullptr;
+    }
+    /// Set last packet as memcpy dispatch
+    void SetLastPacketMemcpy() {
+      last_packet_.type = LastPacket::MEMCPY;
+      last_packet_.barrier_event = nullptr;
+    }
+    /// Clear last packet state
+    void ClearLastPacket() {
+      last_packet_.type = LastPacket::NONE;
+      last_packet_.barrier_event = nullptr;
+    }
+
   private:
     ~Stream() = default;
 
@@ -457,6 +487,9 @@ namespace hip {
     std::unordered_set<hipStream_t> parallelCaptureStreams_; //!< Forked parallel capture branches
     std::unordered_set<hipEvent_t> captureEvents_;        //!< Events tied to this capture
     uint64_t captureID_ = 0;                              //!< Unique ID for this capture sequence
+
+    // ----- Event record coalescing state -----
+    LastPacket last_packet_;  //!< Last packet dispatched (for coalescing)
 
     static CommandQueue::Priority convertToQueuePriority(Priority p) {
       return p == Priority::High  ? amd::CommandQueue::Priority::High

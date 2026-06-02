@@ -815,6 +815,10 @@ hipError_t ihipMemcpy(void* dst, const void* src, size_t sizeBytes, hipMemcpyKin
       }
     }
   }
+
+  // Mark memcpy dispatch on the stream
+  stream.SetLastPacketMemcpy();
+
   command->release();
   return hipSuccess;
 }

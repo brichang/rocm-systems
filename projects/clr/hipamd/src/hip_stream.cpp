@@ -372,6 +372,8 @@ hipError_t hipStreamSynchronize_common(hipStream_t stream) {
   constexpr bool wait = false;
   auto hip_stream = hip::getStream(stream, wait);
   hip_stream->finish();
+  // Clear last packet state after stream synchronization
+  hip_stream->ClearLastPacket();
   hip_stream->GetDevice()->ReleaseFreedMemory();
   return hipSuccess;
 }

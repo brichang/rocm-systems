@@ -167,6 +167,13 @@ class Event {
   std::recursive_mutex lock_;  //!< Mutex for thread-safe access to event state
   amd::Event* event_;          //!< Underlying ROCclr event object for GPU synchronization
   int device_id_;              //!< Device ID where this event was created
+  std::atomic<bool> synced_since_last_record_{false};  //!< Set by hipEventSynchronize, cleared by hipEventRecord
+
+ public:
+  void MarkSynced() { synced_since_last_record_.store(true, std::memory_order_release); }
+  bool WasSyncedSinceLastRecord() {
+    return synced_since_last_record_.exchange(false, std::memory_order_acq_rel);
+  }
 };
 
 class EventDD : public Event {
