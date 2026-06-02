@@ -177,7 +177,9 @@ jobs:
         run: |
           git config --global --add safe.directory '*'
           apt-get update
-          apt-get install -y g++-11 g++-12 cmake python3-pip libdw-dev libsqlite3-dev libdrm-dev file autoconf pkg-config rpm libzstd-dev
+          # libopenmpi-dev + openmpi-bin provide an MPI implementation so find_package(MPI)
+          # succeeds and the rocprofv3 mpi-ranks integration tests run instead of being disabled.
+          apt-get install -y g++-11 g++-12 cmake python3-pip libdw-dev libsqlite3-dev libdrm-dev file autoconf pkg-config rpm libzstd-dev libopenmpi-dev openmpi-bin
           update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-11 10 --slave /usr/bin/g++ g++ /usr/bin/g++-11 --slave /usr/bin/gcov gcov /usr/bin/gcov-11
           update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 20 --slave /usr/bin/g++ g++ /usr/bin/g++-12 --slave /usr/bin/gcov gcov /usr/bin/gcov-12
           python3 -m pip install -U --user -r requirements.txt
@@ -397,6 +399,39 @@ jobs:
           dnf install -y curl
           ln -s /usr/local/bin/curl /usr/bin/curl
 
+      - name: Ensure OpenMPI is available
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          # Prefer an MPI already provided by the container image/runner so that
+          # find_package(MPI) picks up the intended mpirun. Only install when one
+          # is not already present.
+          if command -v mpirun >/dev/null 2>&1; then
+            echo "Using pre-installed MPI: $(command -v mpirun)"
+            exit 0
+          fi
+
+          # No MPI found: install via the platform package manager (this job runs
+          # on RPM/SUSE-based images).
+          if command -v dnf >/dev/null 2>&1; then
+            dnf install -y openmpi openmpi-devel
+          elif command -v zypper >/dev/null 2>&1; then
+            zypper --non-interactive install openmpi4 openmpi4-devel
+          fi
+
+          # RHEL/SUSE install OpenMPI outside the default PATH (and the exact
+          # location differs per distro/version). Discover the installed location
+          # dynamically rather than hard-coding distro-specific paths.
+          if ! command -v mpirun >/dev/null 2>&1; then
+            mpirun_path=$(find /usr -type f -name mpirun 2>/dev/null | head -n1)
+            if [ -n "${mpirun_path}" ]; then
+              mpi_bin=$(dirname "${mpirun_path}")
+              mpi_root=$(dirname "${mpi_bin}")
+              echo "${mpi_bin}" >> "$GITHUB_PATH"
+              echo "LD_LIBRARY_PATH=${mpi_root}/lib:${mpi_root}/lib64:${LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+            fi
+          fi
+
       - name: Build ROCProfiler SDK Dependencies
         uses: ./.github/actions/rocprofiler-sdk-util
         with:
@@ -530,7 +565,7 @@ jobs:
       run: |
         git config --global --add safe.directory '*'
         apt-get update
-        apt-get install -y build-essential cmake python3-pip libasan8 libtsan2 software-properties-common clang-15 libdw-dev libsqlite3-dev libdrm-dev file autoconf pkg-config
+        apt-get install -y build-essential cmake python3-pip libasan8 libtsan2 software-properties-common clang-15 libdw-dev libsqlite3-dev libdrm-dev file autoconf pkg-config libopenmpi-dev openmpi-bin
         add-apt-repository ppa:ubuntu-toolchain-r/test
         apt-get update
         apt-get upgrade -y
