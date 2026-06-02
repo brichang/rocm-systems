@@ -180,6 +180,10 @@ hipError_t Event::streamWait(hip::Stream* stream, uint flags) {
 
   command->enqueue();
   command->release();
+  // The wait marker enqueued above must break event-record coalescing on the
+  // waiting stream: a subsequent hipEventRecord must not be skipped, otherwise
+  // it could miss the cross-stream dependency just established.
+  stream->ClearLastPacket();
   return hipSuccess;
 }
 
@@ -460,12 +464,20 @@ hipError_t hipEventRecord_common(hipEvent_t event, hipStream_t stream, uint32_t 
     return hipErrorInvalidResourceHandle;
   }
 
-  // Coalesce consecutive records on the same event
-  const auto last_packet = hip_stream->GetLastPacket();
-  if (last_packet.type == hip::Stream::LastPacket::BARRIER &&
-      last_packet.barrier_event == event &&
-      !e->WasSyncedSinceLastRecord()) {
-    return hipSuccess;
+  // Always clear the synced-since-last-record flag on every record, so a
+  // mismatched last_packet here doesn't leave a stale "synced" bit that would
+  // wrongly prevent coalescing on a later matching record.
+  const bool was_synced = e->WasSyncedSinceLastRecord();
+
+  // Coalesce consecutive records on the same event. Only events created with
+  // hipEventDisableTiming are eligible: timing-enabled events must always emit
+  // a fresh marker so hipEventElapsedTime reflects the latest record point.
+  if (e->flags() & hipEventDisableTiming) {
+    const auto last_packet = hip_stream->GetLastPacket();
+    if (last_packet.type == hip::Stream::LastPacket::BARRIER &&
+        last_packet.barrier_event == event && !was_synced) {
+      return hipSuccess;
+    }
   }
 
   hipError_t result = e->addMarker(hip_stream, nullptr, !hip::Event::kBatchFlush);

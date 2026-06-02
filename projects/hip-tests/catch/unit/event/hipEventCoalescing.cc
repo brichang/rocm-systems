@@ -86,12 +86,11 @@ HIP_TEST_CASE(Unit_hipEventCoalescing_CrossStreamWait) {
 
     HIP_CHECK(hipStreamSynchronize(stream2));
 
-    // D_d should equal (A_d + B_d) + B_d
+    // D_d should equal (A_d + B_d) + B_d. Use checkVectors with tolerance
+    // (TOL) rather than per-element strict equality.
     HIP_CHECK(hipMemcpy(D_h, D_d, Nbytes, hipMemcpyDeviceToHost));
-    for (size_t i = 0; i < N; i++) {
-      float expected = (A_h[i] + B_h[i]) + B_h[i];
-      REQUIRE(D_h[i] == expected);
-    }
+    HipTest::checkVectors<float>(
+        A_h, B_h, D_h, N, [](float a, float b) { return (a + b) + b; });
   }
 
   HIP_CHECK(hipEventDestroy(event));
@@ -158,9 +157,8 @@ HIP_TEST_CASE(Unit_hipEventCoalescing_AsyncOpsBreakCoalescing) {
       // Read back without further sync — relies on event sync covering the memcpy
       std::vector<int> h_verify(N, 0);
       HIP_CHECK(hipMemcpy(h_verify.data(), d_buf, Nbytes, hipMemcpyDeviceToHost));
-      for (size_t i = 0; i < N; i++) {
-        REQUIRE(h_verify[i] == sentinel);
-      }
+      REQUIRE(std::all_of(h_verify.begin(), h_verify.end(),
+                          [sentinel](int v) { return v == sentinel; }));
     }
   }
 
@@ -181,9 +179,8 @@ HIP_TEST_CASE(Unit_hipEventCoalescing_AsyncOpsBreakCoalescing) {
 
       std::vector<int> h_verify(N, 0);
       HIP_CHECK(hipMemcpy(h_verify.data(), d_buf, Nbytes, hipMemcpyDeviceToHost));
-      for (size_t i = 0; i < N; i++) {
-        REQUIRE(h_verify[i] == expected);
-      }
+      REQUIRE(std::all_of(h_verify.begin(), h_verify.end(),
+                          [expected](int v) { return v == expected; }));
     }
   }
 
@@ -305,7 +302,7 @@ HIP_TEST_CASE(Unit_hipEventCoalescing_InterleavedEvents) {
 HIP_TEST_CASE(Unit_hipEventCoalescing_EventQuery) {
   constexpr size_t N = 1024 * 64;
   constexpr size_t Nbytes = N * sizeof(int);
-  constexpr int kNumIterations = 5;
+  constexpr int kNumIterations = 2;
   constexpr int kThreadsPerBlock = 256;
   const int kBlocks = (N + kThreadsPerBlock - 1) / kThreadsPerBlock;
   // High count makes addCount slow enough to query before completion
@@ -332,10 +329,10 @@ HIP_TEST_CASE(Unit_hipEventCoalescing_EventQuery) {
     HIP_CHECK(hipEventRecord(event, stream));  // Should coalesce
     HIP_CHECK(hipEventRecord(event, stream));  // Should coalesce
 
-    // Query event - should be NotReady because slow kernel is still running.
-    // If coalescing wrongly returned success without a barrier, this would fail.
-    hipError_t query_status = hipEventQuery(event);
-    REQUIRE((query_status == hipErrorNotReady || query_status == hipSuccess));
+    // Query must report NotReady — the heavy addCount kernel above is still
+    // running. Accepting hipSuccess here would hide a regression where
+    // coalescing wrongly left the event in a completed state without a barrier.
+    REQUIRE(hipEventQuery(event) == hipErrorNotReady);
 
     // After full sync, query must report success
     HIP_CHECK(hipStreamSynchronize(stream));

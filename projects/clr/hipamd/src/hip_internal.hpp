@@ -442,25 +442,39 @@ namespace hip {
       hipEvent_t barrier_event = nullptr;  //!< Only valid when type == BARRIER
     };
 
-    /// Get last packet info (for coalescing check)
-    const LastPacket& GetLastPacket() const { return last_packet_; }
+    /// Get last packet info (for coalescing check). Returns a snapshot by value
+    /// since the stream may be used concurrently from multiple host threads.
+    LastPacket GetLastPacket() const {
+      std::scoped_lock lock(last_packet_lock_);
+      return last_packet_;
+    }
     /// Set last packet as a barrier for the given event
     void SetLastPacketBarrier(hipEvent_t e) {
+      std::scoped_lock lock(last_packet_lock_);
       last_packet_.type = LastPacket::BARRIER;
       last_packet_.barrier_event = e;
     }
     /// Set last packet as kernel dispatch
     void SetLastPacketKernel() {
+      std::scoped_lock lock(last_packet_lock_);
       last_packet_.type = LastPacket::KERNEL;
       last_packet_.barrier_event = nullptr;
     }
     /// Set last packet as memcpy dispatch
     void SetLastPacketMemcpy() {
+      std::scoped_lock lock(last_packet_lock_);
       last_packet_.type = LastPacket::MEMCPY;
+      last_packet_.barrier_event = nullptr;
+    }
+    /// Set last packet as memset dispatch
+    void SetLastPacketMemset() {
+      std::scoped_lock lock(last_packet_lock_);
+      last_packet_.type = LastPacket::MEMSET;
       last_packet_.barrier_event = nullptr;
     }
     /// Clear last packet state
     void ClearLastPacket() {
+      std::scoped_lock lock(last_packet_lock_);
       last_packet_.type = LastPacket::NONE;
       last_packet_.barrier_event = nullptr;
     }
@@ -489,6 +503,7 @@ namespace hip {
     uint64_t captureID_ = 0;                              //!< Unique ID for this capture sequence
 
     // ----- Event record coalescing state -----
+    mutable std::mutex last_packet_lock_;  //!< Guards last_packet_ (hot path; separate from lock_)
     LastPacket last_packet_;  //!< Last packet dispatched (for coalescing)
 
     static CommandQueue::Priority convertToQueuePriority(Priority p) {

@@ -3367,6 +3367,7 @@ hipError_t ihipMemset(void* dst, int64_t value, size_t valueSize, size_t sizeByt
   }
 
   command->enqueue();
+  hip_stream->SetLastPacketMemset();
   if (!isAsync) {
     hip_stream->finish();
   }
@@ -3538,6 +3539,7 @@ hipError_t ihipMemset3D(hipPitchedPtr pitchedDevPtr, int value, hipExtent extent
     return status;
   }
   command->enqueue();
+  hip_stream->SetLastPacketMemset();
   if (!isAsync) {
     hip_stream->finish();
   }
