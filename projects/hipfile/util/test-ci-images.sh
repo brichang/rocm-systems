@@ -66,9 +66,11 @@ compute_full_ci_images_matrix() {
 # docker-pull time, surfacing the malformed include to the maintainer.
 compute_ci_images_refactored() {
   local build_matrix="$1"
+  local nightly_build="${2:-}"
   jq -c -n \
     --arg registry "ghcr.io/testorg" \
     --arg tag "latest-rocm" \
+    --arg nightly_build "$nightly_build" \
     --argjson build_matrix "$build_matrix" \
     '
       $build_matrix.include
@@ -77,11 +79,16 @@ compute_ci_images_refactored() {
           {}; . + {
             ($combo.platform + "-" + $combo.version): (
               ( $combo
+                | .version_for_tag = (if .version == "nightly"
+                                      then "-nightly" else .version end)
+                | .build_suffix    = (if .version == "nightly" and ($nightly_build | length) > 0
+                                      then "-" + $nightly_build
+                                      else "" end)
                 | .image_name    = ($registry + "/hipfile/ais_ci_" + .platform)
-                | .image         = (.image_name + ":" + $tag + .version)
-                | .cache         = (.image_name + ":latest-rocm" + .version + "-cache")
-                | .image_nvidia  = (.image_name + ":" + $tag + .version + "-nvidia")
-                | .cache_nvidia  = (.image_name + ":latest-rocm" + .version + "-nvidia-cache")
+                | .image         = (.image_name + ":" + $tag + .version_for_tag + .build_suffix)
+                | .cache         = (.image_name + ":latest-rocm" + .version_for_tag + "-cache")
+                | .image_nvidia  = (.image_name + ":" + $tag + .version_for_tag + .build_suffix + "-nvidia")
+                | .cache_nvidia  = (.image_name + ":latest-rocm" + .version_for_tag + "-nvidia-cache")
               ) | {
                 ci_image:              (.image        | ascii_downcase),
                 ci_image_cache:        (.cache        | ascii_downcase),
@@ -119,6 +126,16 @@ assert_eq() {
   else
     printf '  FAIL  %s\n        expected: %s\n        got:      %s\n' \
       "$label" "$e_norm" "$a_norm"
+  fi
+}
+
+assert_str() {
+  local label="$1" actual="$2" expected="$3"
+  if [ "$actual" = "$expected" ]; then
+    printf '  PASS  %s\n        -> %s\n' "$label" "$actual"
+  else
+    printf '  FAIL  %s\n        expected: %s\n        got:      %s\n' \
+      "$label" "$expected" "$actual"
   fi
 }
 
@@ -204,6 +221,36 @@ echo "Test 12: future axes, no excludes/includes"
 run_scenario "  output" \
   '{"supported_platforms":["ubuntu"],"rocm_versions":["7.2.2"],"cxx_standard":[17,20],"compiler":["clang","gcc"],"include":[],"exclude":[]}' \
   '{"include":[{"supported_platforms":"ubuntu","rocm_versions":"7.2.2"}]}'
+
+# Nightly tag shape: the image/nvidia tags carry the resolved build id while the
+# cache refs stay floating. Asserts the actual strings, not just the (sp,rv) set.
+NIGHTLY_BM='{"include":[{"supported_platforms":"ubuntu","rocm_versions":"nightly"}]}'
+NIGHTLY_IMAGES=$(compute_ci_images_refactored "$NIGHTLY_BM" "20260602-26796279962")
+
+echo
+echo "Test 13: nightly image tag carries build id, cache ref floats"
+assert_str "  ci_image" \
+  "$(printf '%s' "$NIGHTLY_IMAGES" | jq -r '."ubuntu-nightly".ci_image')" \
+  "ghcr.io/testorg/hipfile/ais_ci_ubuntu:latest-rocm-nightly-20260602-26796279962"
+
+echo
+echo "Test 14: nightly cache ref omits the build id (floating)"
+assert_str "  ci_image_cache" \
+  "$(printf '%s' "$NIGHTLY_IMAGES" | jq -r '."ubuntu-nightly".ci_image_cache')" \
+  "ghcr.io/testorg/hipfile/ais_ci_ubuntu:latest-rocm-nightly-cache"
+
+echo
+echo "Test 15: nightly nvidia tag carries build id before -nvidia"
+assert_str "  ci_image_nvidia" \
+  "$(printf '%s' "$NIGHTLY_IMAGES" | jq -r '."ubuntu-nightly".ci_image_nvidia')" \
+  "ghcr.io/testorg/hipfile/ais_ci_ubuntu:latest-rocm-nightly-20260602-26796279962-nvidia"
+
+echo
+echo "Test 16: nightly with empty build id omits the suffix"
+NIGHTLY_IMAGES_NOBUILD=$(compute_ci_images_refactored "$NIGHTLY_BM" "")
+assert_str "  ci_image" \
+  "$(printf '%s' "$NIGHTLY_IMAGES_NOBUILD" | jq -r '."ubuntu-nightly".ci_image')" \
+  "ghcr.io/testorg/hipfile/ais_ci_ubuntu:latest-rocm-nightly"
 
 echo
 echo "Done."
