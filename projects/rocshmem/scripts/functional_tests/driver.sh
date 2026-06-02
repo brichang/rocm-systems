@@ -150,6 +150,7 @@ declare -A TEST_NUMBERS=(
   ["tile_get_rowmajor"]="114"
   ["tile_get_colmajor"]="115"
   ["tile_get_arbitrary"]="116"
+  ["teamsplit2d"]="117"
 )
 
 ExecTest() {
@@ -630,6 +631,7 @@ TestOther() {
   ExecTest  "teamctxsharedinfra"  5       1            1
   ExecTest  "teamctxsubsetparentinfra" 4  1            1
   ExecTest  "teamctxsubsetparentinfra" 5  1            1
+  ExecTest  "teamsplit2d"              4  1            1
   unset ROCSHMEM_MAX_NUM_CONTEXTS
 
   ExecTest  "shmemptr"         2       1            1         8
