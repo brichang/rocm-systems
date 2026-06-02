@@ -9,6 +9,7 @@
 #include "rocjitsu/isa/arch/amdgpu/cdna2/isa.h"
 #include "rocjitsu/isa/arch/amdgpu/cdna3/isa.h"
 #include "rocjitsu/isa/arch/amdgpu/cdna4/isa.h"
+#include "rocjitsu/isa/arch/amdgpu/gfx1250/isa.h"
 #include "rocjitsu/isa/arch/amdgpu/rdna1/isa.h"
 #include "rocjitsu/isa/arch/amdgpu/rdna2/isa.h"
 #include "rocjitsu/isa/arch/amdgpu/rdna3/isa.h"
@@ -59,7 +60,7 @@ constexpr uint16_t kTtmpRdna4GridX = 9;
 [[nodiscard]] bool is_rdna_arch(rj_code_arch_t arch) {
   return arch == ROCJITSU_CODE_ARCH_RDNA1 || arch == ROCJITSU_CODE_ARCH_RDNA2 ||
          arch == ROCJITSU_CODE_ARCH_RDNA3 || arch == ROCJITSU_CODE_ARCH_RDNA3_5 ||
-         arch == ROCJITSU_CODE_ARCH_RDNA4;
+         arch == ROCJITSU_CODE_ARCH_RDNA4 || arch == ROCJITSU_CODE_ARCH_GFX1250;
 }
 
 [[nodiscard]] bool arch_supports_wave_size(rj_code_arch_t arch, uint32_t wf) {
@@ -82,6 +83,8 @@ constexpr uint16_t kTtmpRdna4GridX = 9;
     return supports_wave_size<rdna3_5::Isa>(wf);
   case ROCJITSU_CODE_ARCH_RDNA4:
     return supports_wave_size<rdna4::Isa>(wf);
+  case ROCJITSU_CODE_ARCH_GFX1250:
+    return supports_wave_size<gfx1250::Isa>(wf);
   default:
     return false;
   }
@@ -107,6 +110,8 @@ constexpr uint16_t kTtmpRdna4GridX = 9;
     return rdna3_5::Isa::WF_SIZE;
   case ROCJITSU_CODE_ARCH_RDNA4:
     return rdna4::Isa::WF_SIZE;
+  case ROCJITSU_CODE_ARCH_GFX1250:
+    return gfx1250::Isa::WF_SIZE;
   default:
     return 64;
   }
@@ -132,6 +137,8 @@ constexpr uint16_t kTtmpRdna4GridX = 9;
     return rdna3_5::Isa::MAX_SGPRS_PER_WF;
   case ROCJITSU_CODE_ARCH_RDNA4:
     return rdna4::Isa::MAX_SGPRS_PER_WF;
+  case ROCJITSU_CODE_ARCH_GFX1250:
+    return gfx1250::Isa::MAX_SGPRS_PER_WF;
   default:
     return 0;
   }
@@ -157,6 +164,8 @@ constexpr uint16_t kTtmpRdna4GridX = 9;
     return rdna3_5::Isa::MAX_VGPRS_PER_WF;
   case ROCJITSU_CODE_ARCH_RDNA4:
     return rdna4::Isa::MAX_VGPRS_PER_WF;
+  case ROCJITSU_CODE_ARCH_GFX1250:
+    return gfx1250::Isa::MAX_ADDRESSABLE_VGPRS_PER_WF;
   default:
     return 0;
   }
@@ -182,6 +191,8 @@ constexpr uint16_t kTtmpRdna4GridX = 9;
     return HasAccVgpr<rdna3_5::Isa>;
   case ROCJITSU_CODE_ARCH_RDNA4:
     return HasAccVgpr<rdna4::Isa>;
+  case ROCJITSU_CODE_ARCH_GFX1250:
+    return HasAccVgpr<gfx1250::Isa>;
   default:
     return false;
   }
@@ -338,6 +349,9 @@ void visit_kernel_descriptors(std::span<const uint8_t> image, uint64_t text_offs
 // -----------------------------------------------------------------------------
 
 [[nodiscard]] uint8_t kernel_wavefront_size(rj_code_arch_t guest_arch, const KD &desc) {
+  if (guest_arch == ROCJITSU_CODE_ARCH_GFX1250)
+    return 32;
+
   // CDNA kernels are Wave64 in the code objects currently translated here.
   if (is_cdna_arch(guest_arch))
     return 64;
@@ -403,6 +417,8 @@ void visit_kernel_descriptors(std::span<const uint8_t> image, uint64_t text_offs
     return 4;
   if (is_cdna_arch(arch))
     return 8;
+  if (arch == ROCJITSU_CODE_ARCH_GFX1250)
+    return wavefront_size == 32 ? 16 : 4;
   if (is_rdna_arch(arch))
     return wavefront_size == 32 ? 8 : 4;
   return 1;
@@ -502,7 +518,8 @@ build_kernel_entry_prologue(const KD &src, rj_code_arch_t guest_arch, rj_code_ar
   // - Scratch/private-segment initialization is descriptor-driven today. If a
   //   future target needs SGPR-based scratch setup, it should be appended here
   //   and represented in KdTranslation::prologue_words, not hidden in the patcher.
-  if (is_cdna_arch(guest_arch) && host_arch == ROCJITSU_CODE_ARCH_RDNA4)
+  if (is_cdna_arch(guest_arch) &&
+      (host_arch == ROCJITSU_CODE_ARCH_RDNA4 || host_arch == ROCJITSU_CODE_ARCH_GFX1250))
     append_rdna4_workgroup_grid_prologue(words, src, host_arch);
 
   return words;

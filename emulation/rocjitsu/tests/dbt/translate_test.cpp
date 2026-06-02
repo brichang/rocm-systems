@@ -1230,6 +1230,83 @@ TEST(CodeObjectPatcher, CaveInsertionUpdatesRelocationOffsetsIntoMovedSections) 
       << "ET_DYN relocation r_offset is the relocated storage address";
 }
 
+TEST(KernelDescriptorTranslator, Gfx1250IsWave32EvenWhenDescriptorBitClear) {
+  using KD = rocr::llvm::amdhsa::kernel_descriptor_t;
+  namespace kd = rocr::llvm::amdhsa;
+
+  auto image = make_minimal_amdgpu_elf_with_descriptor_after_text();
+  auto *ehdr = reinterpret_cast<Elf64_Ehdr *>(image.data());
+  auto *shdrs = reinterpret_cast<Elf64_Shdr *>(image.data() + ehdr->e_shoff);
+  auto *desc = reinterpret_cast<KD *>(image.data() + shdrs[2].sh_offset);
+  AMDHSA_BITS_SET(desc->kernel_code_properties, kd::KERNEL_CODE_PROPERTY_ENABLE_WAVEFRONT_SIZE32,
+                  0);
+
+  KernelDescriptorTranslator translator(ROCJITSU_CODE_ARCH_GFX1250, ROCJITSU_CODE_ARCH_GFX1250);
+  const auto translations = translator.translate_image(image, shdrs[1].sh_offset, shdrs[1].sh_size,
+                                                       KernelDescriptorTranslationOptions{});
+
+  ASSERT_EQ(translations.size(), 1u);
+  EXPECT_EQ(translations[0].guest_wavefront_size, 32);
+  EXPECT_EQ(translations[0].host_wavefront_size, 32);
+  EXPECT_EQ(translations[0].target_wave_size, 32);
+  EXPECT_TRUE(translations[0].supported);
+}
+
+TEST(KernelDescriptorTranslator, Gfx1250Supports1024AddressableVgprs) {
+  using KD = rocr::llvm::amdhsa::kernel_descriptor_t;
+  namespace kd = rocr::llvm::amdhsa;
+
+  auto image = make_minimal_amdgpu_elf_with_descriptor_after_text();
+  auto *ehdr = reinterpret_cast<Elf64_Ehdr *>(image.data());
+  auto *shdrs = reinterpret_cast<Elf64_Shdr *>(image.data() + ehdr->e_shoff);
+  auto *desc = reinterpret_cast<KD *>(image.data() + shdrs[2].sh_offset);
+  AMDHSA_BITS_SET(desc->compute_pgm_rsrc1, kd::COMPUTE_PGM_RSRC1_GRANULATED_WORKITEM_VGPR_COUNT,
+                  63);
+
+  KernelDescriptorTranslator translator(ROCJITSU_CODE_ARCH_GFX1250, ROCJITSU_CODE_ARCH_GFX1250);
+  const auto translations = translator.translate_image(image, shdrs[1].sh_offset, shdrs[1].sh_size,
+                                                       KernelDescriptorTranslationOptions{});
+
+  ASSERT_EQ(translations.size(), 1u);
+  EXPECT_EQ(translations[0].guest_vgpr_count, 1024u);
+  EXPECT_EQ(translations[0].host_vgpr_count, 1024u);
+  EXPECT_EQ(translations[0].target_vgpr_count, 1024u);
+  EXPECT_EQ(translations[0].target_vgpr_granulated, 63u);
+  EXPECT_TRUE(translations[0].supported);
+}
+
+TEST(CodeObjectPatcher, Gfx1250PatchSetsWave32DescriptorBit) {
+  using KD = rocr::llvm::amdhsa::kernel_descriptor_t;
+  namespace kd = rocr::llvm::amdhsa;
+
+  auto image = make_minimal_amdgpu_elf_with_descriptor_after_text();
+  AmdGpuCodeObject co(image.data(), image.size());
+  ASSERT_TRUE(co.is_valid());
+  ASSERT_FALSE(co.text_sections().empty());
+
+  KernelDescriptorTranslator translator(ROCJITSU_CODE_ARCH_GFX1250, ROCJITSU_CODE_ARCH_GFX1250);
+  const auto translations = translator.translate_image(
+      image, co.text_sections()[0]->sectionOffset(), co.text_sections()[0]->size(),
+      KernelDescriptorTranslationOptions{});
+  ASSERT_EQ(translations.size(), 1u);
+
+  CodeObjectPatcher patcher(co);
+  ASSERT_TRUE(
+      patcher.apply_kernel_descriptor_translation(translations[0], ROCJITSU_CODE_ARCH_GFX1250));
+
+  auto patched_bytes = patcher.emit();
+  AmdGpuCodeObject patched(patched_bytes.data(), patched_bytes.size());
+  ASSERT_TRUE(patched.is_valid());
+
+  const Section *rodata = find_section(patched, ".rodata");
+  ASSERT_NE(rodata, nullptr);
+  KD patched_desc{};
+  std::memcpy(&patched_desc, rodata->data(), sizeof(patched_desc));
+  EXPECT_EQ(AMDHSA_BITS_GET(patched_desc.kernel_code_properties,
+                            kd::KERNEL_CODE_PROPERTY_ENABLE_WAVEFRONT_SIZE32),
+            1u);
+}
+
 TEST(BinaryTranslator, CaveBranchOverflowLeavesCodeObjectUnchanged) {
   auto image = make_large_amdgpu_elf_with_waitcnt_entry();
   AmdGpuCodeObject co(image.data(), image.size());

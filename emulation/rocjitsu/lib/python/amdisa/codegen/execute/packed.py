@@ -69,6 +69,35 @@ def gen_pk_binop(
         L.append(
             f'    {d}.write_lane(wf, lane, util::f32_to_f16(rlo) | (static_cast<uint32_t>(util::f32_to_f16(rhi)) << 16));'
         )
+    elif dtype == 'bf16':
+        L.append(
+            '    float a_lo = util::bf16_to_f32(static_cast<uint16_t>(sel0_lo ? (raw0 >> 16) : raw0));'
+        )
+        L.append(
+            '    float b_lo = util::bf16_to_f32(static_cast<uint16_t>(sel1_lo ? (raw1 >> 16) : raw1));'
+        )
+        L.append(
+            '    float a_hi = util::bf16_to_f32(static_cast<uint16_t>(sel0_hi ? (raw0 >> 16) : raw0));'
+        )
+        L.append(
+            '    float b_hi = util::bf16_to_f32(static_cast<uint16_t>(sel1_hi ? (raw1 >> 16) : raw1));'
+        )
+        L.append('    if (inst_.neg & 1) { a_lo = -a_lo; }')
+        L.append('    if (inst_.neg & 2) { b_lo = -b_lo; }')
+        L.append('    if (inst_.neg_hi & 1) { a_hi = -a_hi; }')
+        L.append('    if (inst_.neg_hi & 2) { b_hi = -b_hi; }')
+        f_op_map = {
+            'add': ('a_lo + b_lo', 'a_hi + b_hi'),
+            'mul': ('a_lo * b_lo', 'a_hi * b_hi'),
+            'min': ('std::fmin(a_lo, b_lo)', 'std::fmin(a_hi, b_hi)'),
+            'max': ('std::fmax(a_lo, b_lo)', 'std::fmax(a_hi, b_hi)'),
+        }
+        lo_expr, hi_expr = f_op_map[op]
+        L.append(f'    float rlo = {lo_expr};')
+        L.append(f'    float rhi = {hi_expr};')
+        L.append(
+            f'    {d}.write_lane(wf, lane, util::f32_to_bf16(rlo) | (static_cast<uint32_t>(util::f32_to_bf16(rhi)) << 16));'
+        )
     elif dtype == 'i16':
         L.append(
             '    int16_t a_lo = static_cast<int16_t>(sel0_lo ? (raw0 >> 16) : raw0);'
@@ -202,6 +231,40 @@ def gen_pk_ternary(
         L.append(
             f'    {d}.write_lane(wf, lane, util::f32_to_f16(rlo) | (static_cast<uint32_t>(util::f32_to_f16(rhi)) << 16));'
         )
+    elif dtype == 'bf16':
+        L.append(
+            '    float a_lo = util::bf16_to_f32(static_cast<uint16_t>(sel0_lo ? (raw0 >> 16) : raw0));'
+        )
+        L.append(
+            '    float b_lo = util::bf16_to_f32(static_cast<uint16_t>(sel1_lo ? (raw1 >> 16) : raw1));'
+        )
+        L.append(
+            '    float c_lo = util::bf16_to_f32(static_cast<uint16_t>(sel2_lo ? (raw2 >> 16) : raw2));'
+        )
+        L.append(
+            '    float a_hi = util::bf16_to_f32(static_cast<uint16_t>(sel0_hi ? (raw0 >> 16) : raw0));'
+        )
+        L.append(
+            '    float b_hi = util::bf16_to_f32(static_cast<uint16_t>(sel1_hi ? (raw1 >> 16) : raw1));'
+        )
+        L.append(
+            '    float c_hi = util::bf16_to_f32(static_cast<uint16_t>(sel2_hi ? (raw2 >> 16) : raw2));'
+        )
+        L.append('    if (inst_.neg & 1) { a_lo = -a_lo; }')
+        L.append('    if (inst_.neg & 2) { b_lo = -b_lo; }')
+        L.append('    if (inst_.neg & 4) { c_lo = -c_lo; }')
+        L.append('    if (inst_.neg_hi & 1) { a_hi = -a_hi; }')
+        L.append('    if (inst_.neg_hi & 2) { b_hi = -b_hi; }')
+        L.append('    if (inst_.neg_hi & 4) { c_hi = -c_hi; }')
+        if op == 'fma':
+            L.append('    float rlo = std::fma(a_lo, b_lo, c_lo);')
+            L.append('    float rhi = std::fma(a_hi, b_hi, c_hi);')
+        else:
+            L.append('    float rlo = a_lo * b_lo + c_lo;')
+            L.append('    float rhi = a_hi * b_hi + c_hi;')
+        L.append(
+            f'    {d}.write_lane(wf, lane, util::f32_to_bf16(rlo) | (static_cast<uint32_t>(util::f32_to_bf16(rhi)) << 16));'
+        )
     elif dtype == 'i16':
         L.append(
             '    int16_t a_lo = static_cast<int16_t>(sel0_lo ? (raw0 >> 16) : raw0);'
@@ -221,8 +284,23 @@ def gen_pk_ternary(
         L.append(
             '    int16_t c_hi = static_cast<int16_t>(sel2_hi ? (raw2 >> 16) : raw2);'
         )
-        L.append('    uint16_t rlo = static_cast<uint16_t>(a_lo * b_lo + c_lo);')
-        L.append('    uint16_t rhi = static_cast<uint16_t>(a_hi * b_hi + c_hi);')
+        if op in ('min3', 'minimum3'):
+            L.append(
+                '    uint16_t rlo = static_cast<uint16_t>(std::min(std::min(a_lo, b_lo), c_lo));'
+            )
+            L.append(
+                '    uint16_t rhi = static_cast<uint16_t>(std::min(std::min(a_hi, b_hi), c_hi));'
+            )
+        elif op in ('max3', 'maximum3'):
+            L.append(
+                '    uint16_t rlo = static_cast<uint16_t>(std::max(std::max(a_lo, b_lo), c_lo));'
+            )
+            L.append(
+                '    uint16_t rhi = static_cast<uint16_t>(std::max(std::max(a_hi, b_hi), c_hi));'
+            )
+        else:
+            L.append('    uint16_t rlo = static_cast<uint16_t>(a_lo * b_lo + c_lo);')
+            L.append('    uint16_t rhi = static_cast<uint16_t>(a_hi * b_hi + c_hi);')
         L.append(
             f'    {d}.write_lane(wf, lane, static_cast<uint32_t>(rlo) | (static_cast<uint32_t>(rhi) << 16));'
         )
@@ -245,8 +323,15 @@ def gen_pk_ternary(
         L.append(
             '    uint16_t c_hi = static_cast<uint16_t>(sel2_hi ? (raw2 >> 16) : raw2);'
         )
-        L.append('    uint16_t rlo = static_cast<uint16_t>(a_lo * b_lo + c_lo);')
-        L.append('    uint16_t rhi = static_cast<uint16_t>(a_hi * b_hi + c_hi);')
+        if op in ('min3', 'minimum3'):
+            L.append('    uint16_t rlo = std::min(std::min(a_lo, b_lo), c_lo);')
+            L.append('    uint16_t rhi = std::min(std::min(a_hi, b_hi), c_hi);')
+        elif op in ('max3', 'maximum3'):
+            L.append('    uint16_t rlo = std::max(std::max(a_lo, b_lo), c_lo);')
+            L.append('    uint16_t rhi = std::max(std::max(a_hi, b_hi), c_hi);')
+        else:
+            L.append('    uint16_t rlo = static_cast<uint16_t>(a_lo * b_lo + c_lo);')
+            L.append('    uint16_t rhi = static_cast<uint16_t>(a_hi * b_hi + c_hi);')
         L.append(
             f'    {d}.write_lane(wf, lane, static_cast<uint32_t>(rlo) | (static_cast<uint32_t>(rhi) << 16));'
         )
@@ -572,7 +657,7 @@ def gen_dot2(
 
 
 def gen_dot4(dst: list[str], src: list[str], cls: str) -> str:
-    """Generate V_DOT4_I32_I8 / V_DOT4_U32_U8."""
+    """Generate V_DOT4_I32_I8 / V_DOT4_I32_IU8 / V_DOT4_U32_U8."""
     d, s0, s1, s2 = dst[0], src[0], src[1], src[2]
     L = []
     L.append('  uint64_t exec = wf.exec();')
@@ -581,13 +666,31 @@ def gen_dot4(dst: list[str], src: list[str], cls: str) -> str:
     L.append(f'    uint32_t raw0 = {s0}.read_lane(wf, lane);')
     L.append(f'    uint32_t raw1 = {s1}.read_lane(wf, lane);')
 
-    if cls == 'dot4_i32_i8':
+    if cls in ('dot4_i32_i8', 'dot4_i32_iu8'):
         L.append(f'    int32_t acc = static_cast<int32_t>({s2}.read_lane(wf, lane));')
         L.append('    int32_t sum = acc;')
+        if cls == 'dot4_i32_iu8':
+            L.append('    const bool src0_signed = (inst_.neg & 0x1u) != 0;')
+            L.append('    const bool src1_signed = (inst_.neg & 0x2u) != 0;')
         L.append('    for (int i = 0; i < 4; ++i) {')
-        L.append('      int8_t a = static_cast<int8_t>((raw0 >> (i * 8)) & 0xFF);')
-        L.append('      int8_t b = static_cast<int8_t>((raw1 >> (i * 8)) & 0xFF);')
-        L.append('      sum += static_cast<int32_t>(a) * b;')
+        if cls == 'dot4_i32_iu8':
+            L.append('      uint32_t raw_a = (raw0 >> (i * 8)) & 0xFF;')
+            L.append('      uint32_t raw_b = (raw1 >> (i * 8)) & 0xFF;')
+            L.append(
+                '      int32_t a = src0_signed ? static_cast<int32_t>(static_cast<int8_t>(raw_a))'
+            )
+            L.append('                              : static_cast<int32_t>(raw_a);')
+            L.append(
+                '      int32_t b = src1_signed ? static_cast<int32_t>(static_cast<int8_t>(raw_b))'
+            )
+            L.append('                              : static_cast<int32_t>(raw_b);')
+        else:
+            L.append('      int8_t a = static_cast<int8_t>((raw0 >> (i * 8)) & 0xFF);')
+            L.append('      int8_t b = static_cast<int8_t>((raw1 >> (i * 8)) & 0xFF);')
+        if cls == 'dot4_i32_iu8':
+            L.append('      sum += a * b;')
+        else:
+            L.append('      sum += static_cast<int32_t>(a) * b;')
         L.append('    }')
         L.append(
             '    if (inst_.clamp) sum = std::clamp(sum, static_cast<int32_t>(0), std::numeric_limits<int32_t>::max());'
@@ -621,7 +724,7 @@ def gen_dot4(dst: list[str], src: list[str], cls: str) -> str:
 
 
 def gen_dot8(dst: list[str], src: list[str], cls: str) -> str:
-    """Generate V_DOT8_I32_I4 / V_DOT8_U32_U4."""
+    """Generate V_DOT8_I32_I4 / V_DOT8_I32_IU4 / V_DOT8_U32_U4."""
     d, s0, s1, s2 = dst[0], src[0], src[1], src[2]
     L = []
     L.append('  uint64_t exec = wf.exec();')
@@ -630,14 +733,29 @@ def gen_dot8(dst: list[str], src: list[str], cls: str) -> str:
     L.append(f'    uint32_t raw0 = {s0}.read_lane(wf, lane);')
     L.append(f'    uint32_t raw1 = {s1}.read_lane(wf, lane);')
 
-    if cls == 'dot8_i32_i4':
+    if cls in ('dot8_i32_i4', 'dot8_i32_iu4'):
         L.append(f'    int32_t acc = static_cast<int32_t>({s2}.read_lane(wf, lane));')
         L.append('    int32_t sum = acc;')
+        if cls == 'dot8_i32_iu4':
+            L.append('    const bool src0_signed = (inst_.neg & 0x1u) != 0;')
+            L.append('    const bool src1_signed = (inst_.neg & 0x2u) != 0;')
         L.append('    for (int i = 0; i < 8; ++i) {')
-        L.append('      int32_t a = static_cast<int32_t>((raw0 >> (i * 4)) & 0xF);')
-        L.append('      if (a & 0x8) a |= ~0xF;')
-        L.append('      int32_t b = static_cast<int32_t>((raw1 >> (i * 4)) & 0xF);')
-        L.append('      if (b & 0x8) b |= ~0xF;')
+        if cls == 'dot8_i32_iu4':
+            L.append('      uint32_t raw_a = (raw0 >> (i * 4)) & 0xF;')
+            L.append('      uint32_t raw_b = (raw1 >> (i * 4)) & 0xF;')
+            L.append(
+                '      int32_t a = src0_signed ? static_cast<int32_t>((raw_a & 0x8) ? (raw_a | ~0xF) : raw_a)'
+            )
+            L.append('                              : static_cast<int32_t>(raw_a);')
+            L.append(
+                '      int32_t b = src1_signed ? static_cast<int32_t>((raw_b & 0x8) ? (raw_b | ~0xF) : raw_b)'
+            )
+            L.append('                              : static_cast<int32_t>(raw_b);')
+        else:
+            L.append('      int32_t a = static_cast<int32_t>((raw0 >> (i * 4)) & 0xF);')
+            L.append('      if (a & 0x8) a |= ~0xF;')
+            L.append('      int32_t b = static_cast<int32_t>((raw1 >> (i * 4)) & 0xF);')
+            L.append('      if (b & 0x8) b |= ~0xF;')
         L.append('      sum += a * b;')
         L.append('    }')
         L.append(

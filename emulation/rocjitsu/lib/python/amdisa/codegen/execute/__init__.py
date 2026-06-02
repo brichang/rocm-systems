@@ -82,6 +82,7 @@ def _register_handlers() -> None:
     )
     from amdisa.codegen.execute.vector_special import (
         gen_vector_mbcnt,
+        gen_vector_movrel,
         gen_vector_mad_64_32,
         gen_vector_mad_32_16,
         gen_vector_div_fixup,
@@ -94,6 +95,7 @@ def _register_handlers() -> None:
         gen_vector_permlane,
         gen_vector_permlane64,
         gen_vector_cvt_pk,
+        gen_vector_cvt_scale,
     )
     from amdisa.codegen.execute.packed import (
         gen_pk_binop,
@@ -133,6 +135,9 @@ def _register_handlers() -> None:
 
     # Vector special
     DISPATCH['vector_mbcnt'] = lambda c: gen_vector_mbcnt(c.dst_ops, c.src_ops, c.op)
+    DISPATCH['vector_movrel'] = lambda c: gen_vector_movrel(
+        c.dst_ops, c.src_ops, c.op, c.profile.uses_vgpr_msb_indexing
+    )
     DISPATCH['vector_mad_64_32'] = lambda c: gen_vector_mad_64_32(
         c.dst_ops, c.src_ops, c.dtype
     )
@@ -173,6 +178,9 @@ def _register_handlers() -> None:
         c.dst_ops, c.src_ops
     )
     DISPATCH['vector_cvt_pk'] = lambda c: gen_vector_cvt_pk(
+        c.dst_ops, c.src_ops, c.cls, c.op
+    )
+    DISPATCH['vector_cvt_scale'] = lambda c: gen_vector_cvt_scale(
         c.dst_ops, c.src_ops, c.cls, c.op
     )
 

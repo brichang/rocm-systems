@@ -155,6 +155,11 @@ class IsaProfile(ABC):
         ...
 
     @property
+    def generated_arch_name(self) -> str | None:
+        """Override for the generated C++ architecture namespace/directory."""
+        return None
+
+    @property
     def skip_encodings(self) -> frozenset[str]:
         """Encoding names to skip entirely during parsing.
 
@@ -173,6 +178,36 @@ class IsaProfile(ABC):
         decoded under the 64-bit VOP3P_MFMA encoding).
         """
         return {}
+
+    @property
+    def source_split_max_bytes(self) -> dict[str, int]:
+        """Maximum generated source chunk size by encoding.
+
+        Large generated instruction implementation files can be split into
+        multiple translation units. Keys are XML encoding names such as
+        ``ENC_VOP3``; values are soft byte limits used by the generator.
+        """
+        return {}
+
+    @property
+    def uses_vgpr_msb_indexing(self) -> bool:
+        """True when VGPR operands use MODE-controlled high-bank bits."""
+        return False
+
+    @property
+    def hwreg_mode_id(self) -> int | None:
+        """Hardware-register ID for MODE, when modeled by generated setreg code."""
+        return None
+
+    @property
+    def hwreg_status_id(self) -> int:
+        """Hardware-register ID for STATUS in generated getreg/setreg code."""
+        return 1
+
+    @property
+    def hwreg_ib_sts2_id(self) -> int | None:
+        """Hardware-register ID for IB_STS2, when exposed by the target."""
+        return None
 
     @property
     def semantic_overrides(self) -> dict[str, tuple[str, ...]]:
@@ -303,6 +338,16 @@ class IsaProfile(ABC):
             (no renames).
         """
         return {}
+
+    def normalize_encoding_condition(self, enc_name: str, cond_name: str) -> str:
+        """Return the logical condition name to use in generated code.
+
+        Some XML revisions spell an encoding's base condition as an expression
+        rather than the literal ``default`` name. Profiles can normalize those
+        names here while leaving instruction filtering decisions in
+        ``skip_inst_encoding``.
+        """
+        return cond_name
 
     @abstractmethod
     def is_alt_encoding(self, enc_name: str) -> bool:
@@ -565,6 +610,19 @@ class _AmdgpuProfileBase(IsaProfile):
             and parts[2] in self._FLAT_SEGMENTS
         ):
             return 'ENC_FLAT'
+        for suffix in (
+            '_INST_LITERAL64',
+            '_INST_LITERAL',
+            '_VOP_DPP16',
+            '_VOP_DPP8',
+            '_VOP_DPP',
+            '_VOP_SDWA',
+        ):
+            if enc_name.endswith(suffix):
+                parent_name = enc_name[: -len(suffix)]
+                if parent_name.endswith('_ENC'):
+                    return parent_name
+                return f'ENC_{parent_name}'
         return f'ENC_{parts[0]}'
 
     def skip_inst_encoding(self, enc_name: str, enc_cond: str) -> bool:
@@ -1250,3 +1308,78 @@ class Rdna4Profile(_AmdgpuProfileBase):
         if upper in ('ENC_VFLAT', 'ENC_VGLOBAL', 'ENC_VSCRATCH'):
             return _VFLAT_MODIFIERS_RDNA4
         return []
+
+
+class Gfx1250Profile(Rdna4Profile):
+    """ISA profile for gfx1250.
+
+    The gfx1250 encoding model is RDNA4/GFX12-like. Keep it as a named target
+    profile so generated C++ lands under ``amdgpu/gfx1250`` while reusing the
+    RDNA4 parser/codegen rules.
+    """
+
+    @property
+    def generated_arch_name(self) -> str | None:
+        return 'gfx1250'
+
+    _SKIP = frozenset(
+        {
+            'ENC_VOP3PX2',
+            'ENC_VOP3PX3',
+            'VOPD3XY',
+            'VOPDXY_X',
+            'VOPDXY_INST_LITERAL_X',
+            'VOPDXY_Y',
+            'VOPDXY_INST_LITERAL_Y',
+        }
+    )
+
+    _SOP1_BASE_COND = '!has_lit64_0&!has_lit64_1&!has_lit_0&!has_lit_1'
+
+    def normalize_encoding_condition(self, enc_name: str, cond_name: str) -> str:
+        if enc_name.upper() == 'ENC_SOP1' and cond_name == self._SOP1_BASE_COND:
+            return 'default'
+        return super().normalize_encoding_condition(enc_name, cond_name)
+
+    def skip_inst_encoding(self, enc_name: str, enc_cond: str) -> bool:
+        if enc_name.upper() == 'ENC_SOP1' and enc_cond == self._SOP1_BASE_COND:
+            return False
+        return super().skip_inst_encoding(enc_name, enc_cond)
+
+    def field_renames(self, enc_name: str) -> dict[str, str]:
+        renames = dict(super().field_renames(enc_name))
+        renames['literal'] = 'simm32'
+        return renames
+
+    @property
+    def supported_versions(self) -> list[str]:
+        return ['1.2.0']
+
+    @property
+    def wave_size_max(self) -> int:
+        return 32
+
+    @property
+    def uses_vgpr_msb_indexing(self) -> bool:
+        return True
+
+    @property
+    def hwreg_mode_id(self) -> int | None:
+        return 1
+
+    @property
+    def hwreg_status_id(self) -> int:
+        return 2
+
+    @property
+    def hwreg_ib_sts2_id(self) -> int | None:
+        return 28
+
+    @property
+    def source_split_max_bytes(self) -> dict[str, int]:
+        # Keep generated gfx1250 instruction sources under the repository's
+        # added-file size hook without changing the hook policy for all users.
+        return {
+            'ENC_VOP3': 400 * 1024,
+            'ENC_VOPC': 400 * 1024,
+        }

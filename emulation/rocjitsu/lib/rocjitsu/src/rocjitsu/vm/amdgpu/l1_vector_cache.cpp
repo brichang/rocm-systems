@@ -35,12 +35,11 @@ void L1VectorCache::read_bytes(uint64_t addr, uint8_t *dst, uint32_t size, Mtype
     return;
   }
 
-  if (mtype == Mtype::CC) {
-    // SC0/GLC: invalidate stale L1 line to force refetch from L2.
-    // On real hardware, coherently-cacheable loads re-validate against L2
-    // even on L1 hit, ensuring inter-CU stores are visible.
-    cache_.invalidate(addr);
-  }
+  // Functional execution can schedule dependent dispatches on different CUs or
+  // XCDs without modeling global cache probes. Stores are write-through below,
+  // so backing memory is authoritative; force each vector load to refill through
+  // L2 instead of reusing a clean line that may predate another CU's store.
+  cache_.invalidate(addr);
 
   ensure_line(addr);
   cache_.read_line(addr, dst, CacheStore::line_offset(addr), size);
