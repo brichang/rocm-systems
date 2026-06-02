@@ -48,7 +48,8 @@ jobs:
       # be expressed without abandoning the base cross-product.
       MATRIX_INCLUDE: >-
         [
-          {"supported_platforms": "ubuntu", "rocm_versions": "7.13.0"}
+          {"supported_platforms": "ubuntu", "rocm_versions": "7.13.0"},
+          {"supported_platforms": "ubuntu", "rocm_versions": "nightly"}
         ]
       MATRIX_EXCLUDE: >-
         []
