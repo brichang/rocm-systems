@@ -8,104 +8,121 @@ Troubleshooting
 
 This page provides guidance on troubleshooting common hipFile issues.
 
-Poor NVMe <-> GPU throughput within QEMU virtual machines
-=========================================================
+Required software
+===========================
 
-If NVMe <-> GPU throughput is lower than expected, PCIe devices may not be
-correctly passed into the virtual machine. Ensure that each PCIe device (GPU,
-NVMe) passed into a QEMU virtual machine is attached to its own root port. PCIe
-devices attached directly to a QEMU virtual machine's root bus will be unable to
-fully utilize the PCIe bandwidth of the hardware.
-
-The following is the output of ``lspci -tv`` and a snippet from `TransferBench
-<https://github.com/ROCm/TransferBench>`_'s output on a virtual machine where
-the GPU is attached directly to the root bus.
-GPU <-> CPU bandwidth is significantly lower than expected.
+Use the ``ais-check`` utility to verify the system has the required software
+components necessary for hipFile's fastpath. If any of the required components
+are missing, hipFile will use the fallback path.
 
 .. code-block:: none
 
-  $ lspci -tv
-  -[0000:00]-+-00.0  Intel Corporation 82G33/G31/P35/P31 Express DRAM Controller
-             +-01.0  Device 1234:1111
-             +-02.0  Red Hat, Inc. Virtio block device
-             +-03.0  Red Hat, Inc. Virtio network device
-             +-04.0  KIOXIA Corporation NVMe SSD Controller XG8
-             +-11.0  Advanced Micro Devices, Inc. [AMD/ATI] Navi 31 [Radeon RX 7900 XT/7900 XTX/7900M]
-             +-11.1  Advanced Micro Devices, Inc. [AMD/ATI] Navi 31 HDMI/DP Audio
-             +-11.2  Advanced Micro Devices, Inc. [AMD/ATI] Navi 31 USB
-             +-11.3  Advanced Micro Devices, Inc. [AMD/ATI] Device 7444
-             +-1f.0  Intel Corporation 82801IB (ICH9) LPC Interface Controller
-             +-1f.2  Intel Corporation 82801IR/IO/IH (ICH9R/DO/DH) 6 port SATA Controller [AHCI mode]
-             \-1f.3  Intel Corporation 82801I (ICH9 Family) SMBus Controller
+  $ ais-check
+  AIS support in:
+          Kernel P2PDMA support   : True
+          HIP runtime             : True
+          amdgpu                  : True
 
-  $ TransferBench p2p
-  ... snip ...
-                             CPU->CPU  CPU->GPU  GPU->CPU  GPU->GPU
-  Averages (During UniDir):       N/A      5.48      7.17       N/A
+Backing Storage
+===============
 
-When the PCIe devices are attached to their own root ports, PCIe bandwidth
-between devices is in line with bare metal performance. Below is the output of
-``lspci -tv`` and a snippet of TransferBench's output on a virtual machine where
-a GPU and NVMe drive are attached to their own root ports.
+Currently hipFile's fastpath is only supported on:
 
-.. code-block:: none
+ - raw NVMe block devices
+ - ext4 on an NVMe block device
+ - xfs on an NVMe block device
 
-  $ lspci -tv
-  -[0000:00]-+-00.0  Intel Corporation 82G33/G31/P35/P31 Express DRAM Controller
-             +-01.0  Device 1234:1111
-             +-02.0  Red Hat, Inc. Virtio block device
-             +-03.0  Red Hat, Inc. Virtio network device
-             +-04.0-[01]----00.0  KIOXIA Corporation NVMe SSD Controller XG8
-             +-05.0-[02]--+-00.0  Advanced Micro Devices, Inc. [AMD/ATI] Navi 31 [Radeon RX 7900 XT/7900 XTX/7900M]
-             |            +-00.1  Advanced Micro Devices, Inc. [AMD/ATI] Navi 31 HDMI/DP Audio
-             |            +-00.2  Advanced Micro Devices, Inc. [AMD/ATI] Navi 31 USB
-             |            \-00.3  Advanced Micro Devices, Inc. [AMD/ATI] Device 7444
-             +-1f.0  Intel Corporation 82801IB (ICH9) LPC Interface Controller
-             +-1f.2  Intel Corporation 82801IR/IO/IH (ICH9R/DO/DH) 6 port SATA Controller [AHCI mode]
-             \-1f.3  Intel Corporation 82801I (ICH9 Family) SMBus Controller
+hipFile will use the fallback path for all other storage.
 
-  $ TransferBench p2p
-  ... snip ...
-                             CPU->CPU  CPU->GPU  GPU->CPU  GPU->GPU
-  Averages (During UniDir):       N/A     21.24     28.00       N/A
+Alignment and IO size
+=====================
 
-Below is an example QEMU command where GPU and NVMe devices are attached to
-their own root ports:
+Each IO request must meet alignment and size requirements of the underlying file
+system and storage device for hipFile to use the fastpath.. ``statx`` can be
+used to determine the offset alignment and io size requirements
+(``stx_dio_offset_align``), and memory alignment requirement
+(``stx_dio_mem_align``) of the storage.
 
-.. code-block:: none
+If an IO request does not meet alignment and size requirements, hipFile will use
+the fallback path. ``ais-stasts`` can be used to determine if IO requests are
+using the fallback path.
 
-  ./qemu-system-x86_64 \
-      -machine q35,accel=kvm,kernel_irqchip=on \
-      -cpu host,topoext=on,migratable=off \
-      -smp 32,sockets=1,dies=2,cores=8,threads=2 \
-      -m 96G \
-      -drive file=disk.qcow2,if=none,id=disk0,format=qcow2,cache=none,aio=io_uring,discard=unmap \
-      -device virtio-blk-pci,drive=disk0,id=virtio-disk0 \
-      -netdev user,id=net0 \
-      -device virtio-net-pci,netdev=net0,id=nic0 \
-      -device pcie-root-port,id=pcie.1,bus=pcie.0,chassis=1,slot=1 \
-      -device vfio-pci,bus=pcie.1,host=0000:01:00.0 \
-      -device pcie-root-port,id=pcie.2,bus=pcie.0,chassis=2,slot=2,multifunction=on \
-      -device vfio-pci,bus=pcie.2,host=0000:83:00.0,addr=0.0,multifunction=on \
-      -device vfio-pci,bus=pcie.2,host=0000:83:00.1,addr=0.1 \
-      -device vfio-pci,bus=pcie.2,host=0000:83:00.2,addr=0.2 \
-      -device vfio-pci,bus=pcie.2,host=0000:83:00.3,addr=0.3
+IO statistics
+=============
 
-From the QEMU command above, the NVMe device is passed through with:
+The ``ais-stats`` utility can be used to display hipFile IO statistics. These
+stats aid clients in determining if hipFile is using the fastpath or the
+fallback path.  See `Stats Collection Tool`_ documentation for more information
+on using ``ais-stats``.
+
+Performance baseline
+====================
+
+``fio``'s ``psync`` engine can be used to establish a peformance baseline for
+hipFile. hipFile should be able to achieve similar performance to ``fio``'s
+``psync`` engine when running on the same storage device, with similar IO sizes.
+
+For example, to get an idea of the performance expected from hipFile on the filesystem mounted at
+``/mnt/storage``, the following command can be used:
 
 .. code-block:: none
 
-      -device pcie-root-port,id=pcie.1,bus=pcie.0,chassis=1,slot=1 \
-      -device vfio-pci,bus=pcie.1,host=0000:01:00.0 \
+    $ fio \
+          --name=test \
+          --directory /mnt/storage \
+          --ioengine=psync \
+          --rw=randread \
+          --direct=1 \
+          --size=128M \
+          --bs=1M \
+          --time_based \
+          --ramp_time=5 \
+          --runtime=10 \
+          --numjobs=1 \
+          --group_reporting
 
-From the QEMU command above, the GPU device is passed through with:
+PCIe Topology
+=============
+
+Use the ``lstopo`` command to inspect the link speeds and NUMA topology of the
+system's PCIe devices. On some systems, bandwidth between the GPU and storage
+device may be limited by the PCIe topology.
+
+The following command will display the PCIe topology of the system:
 
 .. code-block:: none
 
-      -device pcie-root-port,id=pcie.2,bus=pcie.0,chassis=2,slot=2,multifunction=on \
-      -device vfio-pci,bus=pcie.2,host=0000:83:00.0,addr=0.0,multifunction=on \
-      -device vfio-pci,bus=pcie.2,host=0000:83:00.1,addr=0.1 \
-      -device vfio-pci,bus=pcie.2,host=0000:83:00.2,addr=0.2 \
-      -device vfio-pci,bus=pcie.2,host=0000:83:00.3,addr=0.3
+  lstopo --filter core:none --filter group:none --no-caches --no-smt -.ascii
 
-See QEMU's documentation for more information on PCIe passthrough.
+System Log
+==========
+
+Inspect the system log for any hipFile/AIS related errors.
+
+For example the following log message from ```amdgpu`` indicates that it was
+unable to map a hipFile IO to a supported IO device.
+
+.. code-block:: none
+
+  Jun 01 13:11:39 Sharky kernel: amdgpu: Invalid file path or mount point
+  Jun 01 13:11:39 Sharky kernel: amdgpu: Failed to read AIS file: -19
+
+These log messages indicate that IO is being performed to a file on an
+unsupported file system or to an unsupported storage device.
+
+Disable the Fallback Path
+=========================
+
+When hipFile is unable to use its fastpath, it will issue the IO to the fallback
+path. When investigating performance issues, it may be helpful to disable the
+fallback path. With the fallback path disabled hipfile will return an error if
+an IO requests is unable to be completed using the fastpath.
+
+Disable the fallback path by adding ``HIPFILE_ALLOW_COMPAT_MODE=false`` to the
+environment.
+
+For example:
+
+.. code-block:: none
+
+  $ HIPFILE_ALLOW_COMPAT_MODE=false <command>
