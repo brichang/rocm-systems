@@ -631,8 +631,9 @@ TestOther() {
   ExecTest  "teamctxsharedinfra"  5       1            1
   ExecTest  "teamctxsubsetparentinfra" 4  1            1
   ExecTest  "teamctxsubsetparentinfra" 5  1            1
-  ExecTest  "teamsplit2d"              4  1            1
   unset ROCSHMEM_MAX_NUM_CONTEXTS
+  
+  ExecTest  "teamsplit2d"              4  1            1      1
 
   ExecTest  "shmemptr"         2       1            1         8
   ExecTest  "shmemptr"         2       1            1024      8
