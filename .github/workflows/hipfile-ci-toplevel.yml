@@ -24,7 +24,7 @@ jobs:
     outputs:
       changed_dockerfile: ${{ steps.ci-flags.outputs.changed_dockerfile }}
       ci_matrix: ${{ steps.matrices.outputs.ci_matrix }}
-      build_ci_image_matrix: ${{ steps.matrices.outputs.build_ci_image_matrix }}
+      full_CI_images_matrix: ${{ steps.matrices.outputs.full_CI_images_matrix }}
       ci_images: ${{ steps.ci-images.outputs.ci_images }}
     env:
       # Matrix variables go here in JSON notation.
@@ -73,15 +73,15 @@ jobs:
         # job (Linux). GHA expands the cross-product and applies the
         # include/exclude keys itself.
         #
-        # build_ci_image_matrix drives the image-build job. It is derived
-        # by simulating GHA's matrix expansion on ci_matrix, projecting
-        # each resulting combo down to (supported_platforms, rocm_versions),
-        # and deduping. This way, future test-only axes on ci_matrix
-        # (CXX, compiler, ...) do not multiply images, and an exclude that
-        # removes all test legs for a given (platform, version) correctly
-        # removes that image from the build matrix.
+        # full_CI_images_matrix is the catalog of every CI image this run
+        # references (for naming + pulling). It is derived by simulating GHA's
+        # matrix expansion on ci_matrix, projecting each resulting combo down to
+        # (supported_platforms, rocm_versions), and deduping. This way, future
+        # test-only axes on ci_matrix (CXX, compiler, ...) do not multiply
+        # images, and an exclude that removes all test legs for a given
+        # (platform, version) correctly removes that image from the catalog.
         #
-        # The build_ci_image_matrix is emitted in include-only form so GHA spawns
+        # The full_CI_images_matrix is emitted in include-only form so GHA spawns
         # exactly one image-build job per row.
         run: |
           ci_matrix=$(
@@ -101,7 +101,7 @@ jobs:
           echo "${ci_matrix}" | jq .
           echo "ci_matrix=${ci_matrix}" >> ${GITHUB_OUTPUT}
 
-          build_ci_image_matrix=$(
+          full_CI_images_matrix=$(
             printf '%s' "${ci_matrix}" | jq -c '
               . as $ci
               | ($ci
@@ -150,15 +150,15 @@ jobs:
               | { include: $image_pairs }
             '
           )
-          echo "hipFile Build CI Image Matrix: "
-          echo "${build_ci_image_matrix}" | jq .
-          echo "build_ci_image_matrix=${build_ci_image_matrix}" >> ${GITHUB_OUTPUT}
+          echo "hipFile Full CI Images Matrix: "
+          echo "${full_CI_images_matrix}" | jq .
+          echo "full_CI_images_matrix=${full_CI_images_matrix}" >> ${GITHUB_OUTPUT}
       - name: Compute CI image names
         id: ci-images
         env:
           REGISTRY_URL: ghcr.io/${{ github.repository_owner }}
           CHANGED_DOCKERFILE: ${{ steps.ci-flags.outputs.changed_dockerfile }}
-          BUILD_CI_IMAGE_MATRIX: ${{ steps.matrices.outputs.build_ci_image_matrix }}
+          FULL_CI_IMAGES_MATRIX: ${{ steps.matrices.outputs.full_CI_images_matrix }}
         run: |
           if [ "${CHANGED_DOCKERFILE}" = "1" ]; then
             # sanitize ref for tag
@@ -166,9 +166,9 @@ jobs:
           else
             tag="latest-rocm"
           fi
-          # Consume build_ci_image_matrix.include directly: it is already
-          # the deduplicated set of (platform, version) pairs we need to
-          # build, derived from the full GHA-style expansion of ci_matrix.
+          # Consume full_CI_images_matrix.include directly: it is already
+          # the deduplicated set of (platform, version) pairs we name images
+          # for, derived from the full GHA-style expansion of ci_matrix.
           # Single source of truth -- no parallel exclude/include logic
           # here. Partial-axis include rows produce malformed image URLs
           # (e.g. "...:latest-rocm" with no version); the resulting docker
@@ -177,7 +177,7 @@ jobs:
             jq -c -n \
               --arg registry "${REGISTRY_URL}" \
               --arg tag "$tag" \
-              --argjson build_matrix "${BUILD_CI_IMAGE_MATRIX}" \
+              --argjson build_matrix "${FULL_CI_IMAGES_MATRIX}" \
               '
                 $build_matrix.include
                 | map({ platform: .supported_platforms,
@@ -214,7 +214,7 @@ jobs:
       packages: write
     strategy:
       fail-fast: false
-      matrix: ${{ fromJSON(needs.Precheck.outputs.build_ci_image_matrix) }}
+      matrix: ${{ fromJSON(needs.Precheck.outputs.full_CI_images_matrix) }}
     uses: ./.github/workflows/hipfile-image-build.yml
     with:
       ci_image_name: ${{ fromJSON(needs.Precheck.outputs.ci_images)[format('{0}-{1}', matrix.supported_platforms, matrix.rocm_versions)].ci_image }}

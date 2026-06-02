@@ -2,11 +2,11 @@
 #
 # Tests the ci_images jq in .github/workflows/hipfile-ci-toplevel.yml
 # (Precheck job -> "Compute CI image names" step). ci_images consumes
-# build_ci_image_matrix.include and emits the keyed map of image names
+# full_CI_images_matrix.include and emits the keyed map of image names
 # used by downstream jobs. This script covers the same 12 scenarios as
-# test-build-ci-image-matrix.sh to confirm both stay in sync.
+# test-full-ci-images-matrix.sh to confirm both stay in sync.
 #
-# The functions `compute_build_ci_image_matrix` and
+# The functions `compute_full_ci_images_matrix` and
 # `compute_ci_images_refactored` are verbatim copies of the workflow's
 # jq. If you edit either, mirror the change here and re-run.
 #
@@ -14,8 +14,8 @@
 #
 set -uo pipefail  # not -e: keep going on failures
 
-# Reference implementation of build_ci_image_matrix (verbatim from the workflow).
-compute_build_ci_image_matrix() {
+# Reference implementation of full_CI_images_matrix (verbatim from the workflow).
+compute_full_ci_images_matrix() {
   local ci_matrix="$1"
   printf '%s' "$ci_matrix" | jq -c '
     . as $ci
@@ -59,7 +59,7 @@ compute_build_ci_image_matrix() {
   '
 }
 
-# REFACTORED ci_images: iterate build_ci_image_matrix.include and emit the
+# REFACTORED ci_images: iterate full_CI_images_matrix.include and emit the
 # map. No cross-product/exclude/include logic -- single source of truth.
 # jq's null-as-additive-identity for strings handles partial-axis rows
 # safely; the resulting map entries have malformed image URLs that fail at
@@ -125,7 +125,7 @@ assert_eq() {
 run_scenario() {
   local label="$1" ci_matrix="$2" expected="$3"
   local bm images extracted
-  bm=$(compute_build_ci_image_matrix "$ci_matrix")
+  bm=$(compute_full_ci_images_matrix "$ci_matrix")
   images=$(compute_ci_images_refactored "$bm") || {
     printf '  FAIL  %s (refactored ci_images errored)\n' "$label"
     return

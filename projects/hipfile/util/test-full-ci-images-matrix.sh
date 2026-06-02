@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Tests the jq logic that derives build_ci_image_matrix from ci_matrix in
+# Tests the jq logic that derives full_CI_images_matrix from ci_matrix in
 # .github/workflows/hipfile-ci-toplevel.yml (Precheck job -> "Compute matrix
 # configurations" step). That logic simulates GHA's matrix expansion
 # (cross-product -> exclude -> include with merge semantics), projects each
@@ -11,7 +11,7 @@
 # here and re-run. Conversely, if a test scenario surprises you, fix the
 # workflow accordingly.
 #
-# Usage: bash projects/hipfile/util/test-build-ci-image-matrix.sh
+# Usage: bash projects/hipfile/util/test-full-ci-images-matrix.sh
 #
 set -euo pipefail
 
