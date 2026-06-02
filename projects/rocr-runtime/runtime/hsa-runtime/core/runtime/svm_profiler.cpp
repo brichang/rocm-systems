@@ -79,6 +79,9 @@ static const char* smi_event_string(uint32_t event) {
                                   "QUEUE_EVICTION",
                                   "QUEUE_RESTORE",
                                   "UNMAP_FROM_GPU",
+                                  "PROCESS_START",
+                                  "PROCESS_END",
+                                  "QUEUE_RESTORE_RESCHEDULED",
                                   "UNKNOWN"};
 
   event = std::min<uint32_t>(event, sizeof(strings) / sizeof(char*) - 1);
@@ -148,6 +151,7 @@ void SvmProfileControl::PollSmi() {
       HSA_SMI_EVENT_MASK_FROM_INDEX(HSA_SMI_EVENT_PAGE_FAULT_END) |
       HSA_SMI_EVENT_MASK_FROM_INDEX(HSA_SMI_EVENT_QUEUE_EVICTION) |
       HSA_SMI_EVENT_MASK_FROM_INDEX(HSA_SMI_EVENT_QUEUE_RESTORE) |
+      HSA_SMI_EVENT_MASK_FROM_INDEX(HSA_SMI_EVENT_QUEUE_RESTORE_RESCHEDULED) |
       HSA_SMI_EVENT_MASK_FROM_INDEX(HSA_SMI_EVENT_UNMAP_FROM_GPU);
 
   for (int i = 0; i < core::Runtime::runtime_singleton_->gpu_agents().size(); i++) {
@@ -313,6 +317,20 @@ void SvmProfileControl::PollSmi() {
               }
               // gpu_id
               case HSA_SMI_EVENT_QUEUE_RESTORE: {
+                uint32_t gpuid;
+                args = sscanf(cursor, "%x", &gpuid);
+                assert(args == 1 && "Parsing error!");
+                std::string agent = format_agent(gpuid);
+                detail = agent;
+                break;
+              }
+              // gpu_id — same payload shape as QUEUE_RESTORE; the distinct
+              // event ID is the signal that this was a workqueue reschedule
+              // retry of svm_range_restore_work rather than an actual queue
+              // resume. Without distinguishing these two, log consumers cannot
+              // tell whether a high QUEUE_RESTORE count reflects real restore
+              // work or workqueue retry churn from MMU notifier eviction races.
+              case HSA_SMI_EVENT_QUEUE_RESTORE_RESCHEDULED: {
                 uint32_t gpuid;
                 args = sscanf(cursor, "%x", &gpuid);
                 assert(args == 1 && "Parsing error!");
