@@ -11,6 +11,8 @@ add_executable(
     test_environ_cache.h
     test_environ_cache.cpp
     test_pc_sampling_feature.cpp
+    test_pc_record_store.cpp
+    test_pc_record_writer.cpp
     mocks.h
     mocks.cpp
     main.cpp

@@ -2,9 +2,16 @@
 // SPDX-License-Identifier:  MIT
 #include "code_object_writer.h"
 #include "gtest/gtest.h"
+#include "mocks.h"
 #include "nlohmann/json.hpp"
+#include "pc_record_store.h"
 #include "pc_sampling_feature.h"
+#include "sdk_callbacks.h"
 
+#include <rocprofiler-sdk/pc_sampling.h>
+#include <rocprofiler-sdk/rocprofiler.h>
+
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -111,9 +118,10 @@ TEST_F(test_pc_sampling_feature_t, FinalizeWritesJsonAndSnapshotsSource)
     const fs::path src = m_tmp / "src" / "k.hip";
     write_file(src, "int main() { return 0; }\n");
 
-    const fs::path output = m_tmp / "out" / "ps_file_code_obj_info.json";
+    const fs::path output  = m_tmp / "out" / "ps_file_code_obj_info.json";
+    const fs::path ps_file = m_tmp / "out" / "ps_file_results.json";
     auto collector = std::make_shared<fake_collector_t>(std::vector<std::string>{src.string()});
-    pc_sampling_feature_t feature(PcSamplingMode::Stochastic, output, collector);
+    pc_sampling_feature_t feature(PcSamplingMode::Stochastic, /*interval=*/0, /*unit=*/"", output, ps_file, collector);
 
     feature.finalize();
 
@@ -141,7 +149,12 @@ TEST_F(test_pc_sampling_feature_t, FinalizeResolvesRelativeOutputUnderCwd)
     write_file(src, "// src\n");
 
     auto collector = std::make_shared<fake_collector_t>(std::vector<std::string>{src.string()});
-    pc_sampling_feature_t feature(PcSamplingMode::Stochastic, "out/ps_file_code_obj_info.json", collector);
+    pc_sampling_feature_t feature(PcSamplingMode::Stochastic,
+                                  /*interval=*/0,
+                                  /*unit=*/"",
+                                  "out/ps_file_code_obj_info.json",
+                                  "out/ps_file_results.json",
+                                  collector);
 
     feature.finalize();
 
@@ -150,4 +163,173 @@ TEST_F(test_pc_sampling_feature_t, FinalizeResolvesRelativeOutputUnderCwd)
     EXPECT_TRUE(fs::exists(snapshot)) << "expected snapshot at " << snapshot;
 
     fs::current_path(cwd_before);
+}
+
+// ---------------------------------------------------------------------------
+// configure() — SDK service wiring
+// ---------------------------------------------------------------------------
+
+namespace
+{
+// Build a PC sampling configuration the mock can advertise for an agent.
+rocprofiler_pc_sampling_configuration_t make_config(rocprofiler_pc_sampling_method_t method,
+                                                    rocprofiler_pc_sampling_unit_t   unit)
+{
+    rocprofiler_pc_sampling_configuration_t config{};
+    config.size         = sizeof(rocprofiler_pc_sampling_configuration_t);
+    config.method       = method;
+    config.unit         = unit;
+    config.min_interval = 1;
+    config.max_interval = 1000;
+    config.flags        = ROCPROFILER_PC_SAMPLING_CONFIGURATION_FLAGS_NONE;
+    return config;
+}
+}  // namespace
+
+TEST(pc_sampling_feature_configure_t, MatchingStochasticConfigConfiguresService)
+{
+    MockSdkWrapper sdk;
+    sdk.set_pc_sampling_agent(/*agent_handle=*/5);
+    sdk.add_pc_sampling_config(make_config(ROCPROFILER_PC_SAMPLING_METHOD_STOCHASTIC,
+                                           ROCPROFILER_PC_SAMPLING_UNIT_CYCLES));
+
+    pc_sampling_feature_t feature(PcSamplingMode::Stochastic,
+                                  /*interval=*/256,
+                                  /*unit=*/"",
+                                  "code_obj.json",
+                                  "ps_file.json");
+
+    rocprofiler_context_id_t ctx{42};
+    int                      user_data = 0;
+    const bool               ok        = feature.configure(ctx, sdk, &user_data);
+
+    EXPECT_TRUE(ok);
+
+    // A delivery buffer is created with the free PC sampling trampoline + the
+    // exact user_data pointer that was passed in.
+    ASSERT_EQ(sdk.get_create_buffer_info().size(), 1u);
+    EXPECT_EQ(sdk.get_create_buffer_info()[0].callback, &pc_sampling_buffer_callback);
+    EXPECT_EQ(sdk.get_create_buffer_info()[0].callback_data, &user_data);
+
+    // The service is configured for the stochastic method on the matched agent.
+    ASSERT_EQ(sdk.get_configure_pc_sampling_service_info().size(), 1u);
+    const auto& cfg = sdk.get_configure_pc_sampling_service_info()[0];
+    EXPECT_EQ(cfg.method, ROCPROFILER_PC_SAMPLING_METHOD_STOCHASTIC);
+    EXPECT_EQ(cfg.agent, 5u);
+    EXPECT_EQ(cfg.context, 42u);
+    EXPECT_EQ(cfg.interval, 256u);
+}
+
+TEST(pc_sampling_feature_configure_t, DisabledModeConfiguresNothing)
+{
+    MockSdkWrapper sdk;
+    sdk.set_pc_sampling_agent(/*agent_handle=*/5);
+    sdk.add_pc_sampling_config(make_config(ROCPROFILER_PC_SAMPLING_METHOD_STOCHASTIC,
+                                           ROCPROFILER_PC_SAMPLING_UNIT_CYCLES));
+
+    // Default-constructed feature is Disabled.
+    pc_sampling_feature_t feature;
+
+    rocprofiler_context_id_t ctx{1};
+    const bool               ok = feature.configure(ctx, sdk, nullptr);
+
+    EXPECT_FALSE(ok);
+    EXPECT_TRUE(sdk.get_create_buffer_info().empty());
+    EXPECT_TRUE(sdk.get_configure_pc_sampling_service_info().empty());
+}
+
+TEST(pc_sampling_feature_configure_t, NoMatchingMethodReturnsFalse)
+{
+    MockSdkWrapper sdk;
+    sdk.set_pc_sampling_agent(/*agent_handle=*/5);
+    // Agent only advertises host_trap, but stochastic is requested.
+    sdk.add_pc_sampling_config(
+        make_config(ROCPROFILER_PC_SAMPLING_METHOD_HOST_TRAP, ROCPROFILER_PC_SAMPLING_UNIT_TIME));
+
+    pc_sampling_feature_t feature(PcSamplingMode::Stochastic,
+                                  /*interval=*/256,
+                                  /*unit=*/"",
+                                  "code_obj.json",
+                                  "ps_file.json");
+
+    rocprofiler_context_id_t ctx{1};
+    const bool               ok = feature.configure(ctx, sdk, nullptr);
+
+    EXPECT_FALSE(ok);
+    EXPECT_TRUE(sdk.get_create_buffer_info().empty());
+    EXPECT_TRUE(sdk.get_configure_pc_sampling_service_info().empty());
+}
+
+TEST(pc_sampling_feature_configure_t, NoAgentReturnsFalse)
+{
+    MockSdkWrapper sdk;  // no agent injected.
+
+    pc_sampling_feature_t feature(PcSamplingMode::HostTrap,
+                                  /*interval=*/0,
+                                  /*unit=*/"",
+                                  "code_obj.json",
+                                  "ps_file.json");
+
+    rocprofiler_context_id_t ctx{1};
+    EXPECT_FALSE(feature.configure(ctx, sdk, nullptr));
+    EXPECT_TRUE(sdk.get_configure_pc_sampling_service_info().empty());
+}
+
+// ---------------------------------------------------------------------------
+// on_pc_sample_records() — record routing into the store (observed via the
+// ps_file JSON written by finalize()).
+// ---------------------------------------------------------------------------
+
+TEST_F(test_pc_sampling_feature_t, OnRecordsRoutesStochasticAndHostTrap)
+{
+    const fs::path output    = m_tmp / "code_obj.json";
+    const fs::path ps_file   = m_tmp / "ps_file_results.json";
+    auto           collector = std::make_shared<fake_collector_t>(std::vector<std::string>{});
+    pc_sampling_feature_t feature(PcSamplingMode::Stochastic, /*interval=*/0, /*unit=*/"", output, ps_file, collector);
+
+    // One stochastic and one host_trap sample, each behind its own header.
+    rocprofiler_pc_sampling_record_stochastic_v0_t stochastic{};
+    stochastic.size                  = sizeof(stochastic);
+    stochastic.pc.code_object_id     = 11;
+    stochastic.pc.code_object_offset = 0x40;
+    stochastic.wave_issued           = 1;
+    stochastic.dispatch_id           = 7;
+
+    rocprofiler_pc_sampling_record_host_trap_v0_t host_trap{};
+    host_trap.size                  = sizeof(host_trap);
+    host_trap.pc.code_object_id     = 22;
+    host_trap.pc.code_object_offset = 0x80;
+    host_trap.dispatch_id           = 9;
+
+    rocprofiler_record_header_t stochastic_header{};
+    stochastic_header.category = ROCPROFILER_BUFFER_CATEGORY_PC_SAMPLING;
+    stochastic_header.kind     = ROCPROFILER_PC_SAMPLING_RECORD_STOCHASTIC_V0_SAMPLE;
+    stochastic_header.payload  = &stochastic;
+
+    rocprofiler_record_header_t host_trap_header{};
+    host_trap_header.category = ROCPROFILER_BUFFER_CATEGORY_PC_SAMPLING;
+    host_trap_header.kind     = ROCPROFILER_PC_SAMPLING_RECORD_HOST_TRAP_V0_SAMPLE;
+    host_trap_header.payload  = &host_trap;
+
+    rocprofiler_record_header_t* headers[2] = {&stochastic_header, &host_trap_header};
+    feature.on_pc_sample_records(headers, 2);
+
+    feature.finalize();
+
+    ASSERT_TRUE(fs::exists(ps_file));
+    std::ifstream  in(ps_file);
+    nlohmann::json json;
+    ASSERT_NO_THROW(in >> json);
+
+    const auto& buffer_records = json["rocprofiler-sdk-tool"][0]["buffer_records"];
+    const auto& stochastic_arr = buffer_records["pc_sample_stochastic"];
+    const auto& host_trap_arr  = buffer_records["pc_sample_host_trap"];
+
+    ASSERT_EQ(stochastic_arr.size(), 1u);
+    ASSERT_EQ(host_trap_arr.size(), 1u);
+    EXPECT_EQ(stochastic_arr[0]["record"]["pc"]["code_object_id"], 11u);
+    EXPECT_EQ(stochastic_arr[0]["record"]["pc"]["code_object_offset"], 0x40u);
+    EXPECT_EQ(stochastic_arr[0]["record"]["dispatch_id"], 7u);
+    EXPECT_EQ(host_trap_arr[0]["record"]["pc"]["code_object_id"], 22u);
+    EXPECT_EQ(host_trap_arr[0]["record"]["dispatch_id"], 9u);
 }
