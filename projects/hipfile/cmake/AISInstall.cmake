@@ -19,6 +19,15 @@ rocm_install(
 
 # Install AIS tools
 install(PROGRAMS tools/ais-check/ais-check DESTINATION bin)
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/tools/ais-stats/CMakeLists.install.cmake"
+    "tools/ais-stats/CMakeLists.txt"
+    @ONLY
+)
+install(FILES
+    "${CMAKE_CURRENT_BINARY_DIR}/tools/ais-stats/CMakeLists.txt"
+    DESTINATION bin
+)
 
 # Install example code
 # Since the input DIRECTORY is `examples` don't include it in
