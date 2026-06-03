@@ -4,6 +4,7 @@
 
 #include "gsl_assert.h"
 
+#include <stdexcept>
 #include <utility>
 
 std::string_view MockInputParameters::get_output_path()
@@ -273,6 +274,11 @@ void MockSdkWrapper::query_pc_sampling_agent_configurations(rocprofiler_agent_id
                                                             rocprofiler_available_pc_sampling_configurations_cb_t cb,
                                                             void* user_data)
 {
+    // Simulate an SDK seam that fails (e.g. PC sampling NOT_IMPLEMENTED), where
+    // the real ROCPROFILER_CALL throws.
+    if (m_query_configs_should_throw)
+        throw std::runtime_error("simulated query pc sampling agent configurations failure");
+
     // Advertise the injected configs (possibly none) for the agent.
     cb(m_pc_sampling_configs.data(), m_pc_sampling_configs.size(), user_data);
 }
@@ -336,6 +342,11 @@ void MockSdkWrapper::set_pc_sampling_agent(uint64_t agent_handle)
 void MockSdkWrapper::add_pc_sampling_config(const rocprofiler_pc_sampling_configuration_t& config)
 {
     m_pc_sampling_configs.push_back(config);
+}
+
+void MockSdkWrapper::set_query_configs_should_throw(bool should_throw)
+{
+    m_query_configs_should_throw = should_throw;
 }
 
 const std::vector<MockSdkWrapper::create_buffer_info>& MockSdkWrapper::get_create_buffer_info() const

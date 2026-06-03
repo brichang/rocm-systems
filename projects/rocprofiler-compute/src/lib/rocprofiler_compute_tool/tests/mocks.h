@@ -174,6 +174,11 @@ public:
     void set_pc_sampling_agent(uint64_t agent_handle);
     void add_pc_sampling_config(const rocprofiler_pc_sampling_configuration_t& config);
 
+    // When set, query_pc_sampling_agent_configurations() throws std::runtime_error
+    // to simulate an SDK seam that fails (e.g. PC sampling NOT_IMPLEMENTED on the
+    // runtime, where ROCPROFILER_CALL throws).
+    void set_query_configs_should_throw(bool should_throw);
+
     const std::vector<create_buffer_info>& get_create_buffer_info() const;
     const std::vector<configure_pc_sampling_service_info>& get_configure_pc_sampling_service_info() const;
     const std::vector<uint64_t>& get_flushed_buffers() const;
@@ -198,8 +203,9 @@ private:
     std::vector<std::string>                     m_counter_names;
     std::vector<hsa_intercept_registration_info> m_hsa_intercept_registration_info;
 
-    bool                                                 m_pc_sampling_agent_set    = false;
-    uint64_t                                             m_pc_sampling_agent_handle = 0;
+    bool                                                 m_pc_sampling_agent_set      = false;
+    bool                                                 m_query_configs_should_throw = false;
+    uint64_t                                             m_pc_sampling_agent_handle   = 0;
     std::vector<rocprofiler_pc_sampling_configuration_t> m_pc_sampling_configs;
     std::vector<create_buffer_info>                      m_create_buffer_info;
     std::vector<configure_pc_sampling_service_info>      m_configure_pc_sampling_service_info;

@@ -11,6 +11,7 @@
 #include <rocprofiler-sdk/agent.h>
 #include <rocprofiler-sdk/pc_sampling.h>
 
+#include <exception>
 #include <filesystem>
 #include <iostream>
 #include <utility>
@@ -162,6 +163,31 @@ bool pc_sampling_feature_t::configure(rocprofiler_context_id_t ctx,
     if (m_mode == PcSamplingMode::Disabled)
         return false;
 
+    // The SDK seam throws on any non-success status (e.g. PC sampling is not
+    // implemented on this runtime/agent, returning
+    // ROCPROFILER_STATUS_ERROR_NOT_IMPLEMENTED). This runs from tool_init,
+    // whose frames are reached through the SDK's C callbacks, so an escaping
+    // exception would reach a C ABI boundary and terminate the profiled
+    // application. Treat any failure as "PC sampling unavailable": log, leave
+    // the buffer unconfigured, and report false so the caller degrades
+    // gracefully (the application still runs; no PC samples are collected).
+    try
+    {
+        return try_configure(ctx, sdk, buffer_callback_user_data);
+    }
+    catch (const std::exception& e)
+    {
+        std::clog << "[rocprofiler-compute] WARNING: PC sampling could not be "
+                     "configured on this system; continuing without PC samples ("
+                  << e.what() << ")\n";
+        return false;
+    }
+}
+
+bool pc_sampling_feature_t::try_configure(rocprofiler_context_id_t ctx,
+                                          SdkWrapper&              sdk,
+                                          void*                    buffer_callback_user_data)
+{
     const auto requested_method = to_sdk_method(m_mode);
     const auto requested_unit   = to_sdk_unit(m_unit);
 

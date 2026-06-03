@@ -40,8 +40,11 @@ public:
     const std::filesystem::path& output_path() const { return m_output_path; }
 
     // Configure the SDK PC sampling service for the requested mode. Returns false
-    // (no SDK service configured, drains nothing) when m_mode == Disabled or no
-    // agent supports the requested method/unit. Caller logs on false.
+    // (no SDK service configured, drains nothing) when m_mode == Disabled, no
+    // agent supports the requested method/unit, or PC sampling is unavailable on
+    // this runtime (the SDK seam throws, e.g. NOT_IMPLEMENTED). Never throws, so
+    // a missing PC sampling capability degrades gracefully instead of aborting
+    // the profiled application. Caller logs on false.
     bool configure(rocprofiler_context_id_t ctx, SdkWrapper& sdk, void* buffer_callback_user_data);
 
     // Buffer callback fan-in: decode PC sample records and append to the store.
@@ -51,6 +54,10 @@ public:
     void finalize();
 
 private:
+    // Body of configure(); may throw from the SDK seam. configure() wraps this
+    // in a try/catch so no exception escapes to the SDK C-callback boundary.
+    bool try_configure(rocprofiler_context_id_t ctx, SdkWrapper& sdk, void* buffer_callback_user_data);
+
     bool                               m_enabled = false;
     PcSamplingMode                     m_mode    = PcSamplingMode::Disabled;
     uint64_t                           m_interval{0};

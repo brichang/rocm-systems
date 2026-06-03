@@ -275,6 +275,31 @@ TEST(pc_sampling_feature_configure_t, NoAgentReturnsFalse)
     EXPECT_TRUE(sdk.get_configure_pc_sampling_service_info().empty());
 }
 
+TEST(pc_sampling_feature_configure_t, SdkQueryFailureDegradesGracefully)
+{
+    // Simulate a runtime where PC sampling is unavailable: the SDK seam throws
+    // (mirrors ROCPROFILER_STATUS_ERROR_NOT_IMPLEMENTED from
+    // rocprofiler_query_pc_sampling_agent_configurations). configure() must NOT
+    // propagate the exception (it runs from tool_init behind the SDK's C
+    // callbacks); it must report false so the profiled application keeps running.
+    MockSdkWrapper sdk;
+    sdk.set_pc_sampling_agent(/*agent_handle=*/5);
+    sdk.set_query_configs_should_throw(true);
+
+    pc_sampling_feature_t feature(PcSamplingMode::Stochastic,
+                                  /*interval=*/256,
+                                  /*unit=*/"",
+                                  "code_obj.json",
+                                  "ps_file.json");
+
+    rocprofiler_context_id_t ctx{1};
+    bool                     ok = true;
+    EXPECT_NO_THROW({ ok = feature.configure(ctx, sdk, nullptr); });
+    EXPECT_FALSE(ok);
+    EXPECT_TRUE(sdk.get_create_buffer_info().empty());
+    EXPECT_TRUE(sdk.get_configure_pc_sampling_service_info().empty());
+}
+
 // ---------------------------------------------------------------------------
 // on_pc_sample_records() — record routing into the store (observed via the
 // ps_file JSON written by finalize()).
