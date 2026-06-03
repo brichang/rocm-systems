@@ -309,6 +309,22 @@ TEST_F(TestRocprofilerComputeTool, HsaInterceptCallback_IsIdempotent)
     EXPECT_EQ(m_sdk_wrapper->get_dispatch_counting_service_info().size(), 1u);
 }
 
+// PC-sampling-only runs request no counters. The dispatch counting service
+// forces the SDK to parse counter_defs.yaml, so it must be skipped when no
+// counters were requested -- but the context must still start so PC sampling
+// and code-object tracing remain active.
+TEST_F(TestRocprofilerComputeTool, HsaInterceptCallback_NoCountersRequested_SkipsCountingServiceButStartsContext)
+{
+    m_input_parameters->unset_requested_counters();
+    const auto cfg = rocprofiler_configure(1, "", 1, &m_client_id);
+    ASSERT_EQ(cfg->initialize(nullptr, cfg->tool_data), 0);
+    ASSERT_EQ(m_sdk_wrapper->get_hsa_intercept_registration_info().size(), 1u);
+    const auto reg = m_sdk_wrapper->get_hsa_intercept_registration_info()[0];
+    reg.callback(ROCPROFILER_HSA_TABLE, 0, 0, nullptr, 0, reg.user_data);
+    EXPECT_TRUE(m_sdk_wrapper->get_dispatch_counting_service_info().empty());
+    EXPECT_EQ(m_sdk_wrapper->get_started_contexts().size(), 1u);
+}
+
 // If HSA loads after tool_fini has run, the callback must not dereference
 // the freed tool_data pointer it captured at registration time.
 TEST_F(TestRocprofilerComputeTool, HsaInterceptCallback_AfterToolFini_IsNoOp)

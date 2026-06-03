@@ -121,11 +121,19 @@ void on_hsa_runtime_loaded(rocprofiler_intercept_table_t /*type*/,
     if (g_hsa_intercept_done.exchange(true, std::memory_order_acq_rel))
         return;
 
-    g_sdk_wrapper->configure_callback_dispatch_counting_service(get_client_ctx(),
-                                                                dispatch_callback,
-                                                                user_data,
-                                                                record_callback,
-                                                                user_data);
+    // Configuring the dispatch counting service forces the SDK to parse the
+    // counter definitions file. In PC-sampling-only mode no counters are
+    // requested and that service is unused, so skip it -- otherwise a missing
+    // counter_defs.yaml aborts the run even though no counters are collected.
+    auto* tool_data = static_cast<std::unique_ptr<tool_data_t>*>(user_data)->get();
+    if (!tool_data->requested_counters.empty())
+    {
+        g_sdk_wrapper->configure_callback_dispatch_counting_service(get_client_ctx(),
+                                                                    dispatch_callback,
+                                                                    user_data,
+                                                                    record_callback,
+                                                                    user_data);
+    }
     g_sdk_wrapper->start_context(get_client_ctx());
 }
 
