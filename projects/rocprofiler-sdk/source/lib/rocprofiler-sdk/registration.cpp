@@ -263,8 +263,8 @@ get_status()
 
 struct attach_status
 {
-    bool has_attach_table = false;
-    bool is_attached      = false;
+    std::atomic<bool> has_attach_table = false;
+    bool              is_attached      = false;
 };
 
 auto*
@@ -844,7 +844,7 @@ invoke_client_finalizer(rocprofiler_client_id_t client_id)
 bool
 supports_attachment()
 {
-    return (get_attach_status()) ? get_attach_status()->has_attach_table : false;
+    return (get_attach_status()) ? get_attach_status()->has_attach_table.load() : false;
 }
 
 void
@@ -1426,6 +1426,10 @@ rocprofiler_set_api_table(const char* name,
 
         auto* rocattach_api = static_cast<RocAttachDispatchTable*>(tables[0]);
 
+        // Set has_attach_table before other initialization so that supports_attachment()
+        // will be correct for any installed interceptions.
+        rocprofiler::registration::get_attach_status()->has_attach_table = true;
+
         // unlike other APIs, we do not offer tracing for our own attach library
         // forward the table to the relevant code sections, then move on
         rocprofiler::code_object::initialize(rocattach_api);
@@ -1433,8 +1437,6 @@ rocprofiler_set_api_table(const char* name,
 #if ROCPROFILER_SDK_HSA_PC_SAMPLING > 0
         rocprofiler::pc_sampling::code_object::initialize(rocattach_api);
 #endif
-
-        rocprofiler::registration::get_attach_status()->has_attach_table = true;
     }
     else
     {
