@@ -24,7 +24,7 @@ jobs:
     outputs:
       changed_dockerfile: ${{ steps.ci-flags.outputs.changed_dockerfile }}
       ci_matrix: ${{ steps.matrices.outputs.ci_matrix }}
-      build_CI_images_matrix: ${{ steps.matrices.outputs.build_CI_images_matrix }}
+      build_CI_images_matrix: ${{ steps.build-ci-images-matrix.outputs.build_CI_images_matrix }}
       ci_images: ${{ steps.ci-images.outputs.ci_images }}
       nightly_build: ${{ steps.nightly.outputs.nightly_build }}
       nightly_rocm_version: ${{ steps.nightly.outputs.nightly_rocm_version }}
@@ -62,6 +62,12 @@ jobs:
           sparse-checkout: |
             projects/hipfile
             .github/workflows
+      - name: Authenticating to GitHub Container Registry
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - name: Git fetch base ref
         working-directory: rocm-systems
         run: git fetch origin "${GITHUB_BASE_REF}"
@@ -72,23 +78,12 @@ jobs:
           echo "changed_dockerfile=$(./util/files-changed.sh "origin/${GITHUB_BASE_REF}" HEAD 'projects/hipfile/util/docker/DOCKERFILE.*')" >> "${GITHUB_OUTPUT}"
       - name: Compute matrix configurations
         id: matrices
-        env:
-          CHANGED_DOCKERFILE: ${{ steps.ci-flags.outputs.changed_dockerfile }}
-        # ci_matrix is the full strategy.matrix object handed to the test
-        # job (Linux). GHA expands the cross-product and applies the
-        # include/exclude keys itself.
-        #
-        # full_CI_images_matrix is the catalog of every CI image this run
-        # references (for naming + pulling). It is derived by simulating GHA's
-        # matrix expansion on ci_matrix, projecting each resulting combo down to
-        # (supported_platforms, rocm_versions), and deduping. This way, future
-        # test-only axes on ci_matrix (CXX, compiler, ...) do not multiply
-        # images, and an exclude that removes all test legs for a given
-        # (platform, version) correctly removes that image from the catalog.
-        #
-        # build_CI_images_matrix is the subset we actually (re)build this run
-        # (see below). Both are emitted in include-only form so GHA spawns
-        # exactly one image-build job per row.
+        # ci_matrix is the full strategy.matrix handed to the Linux test job.
+        # full_CI_images_matrix is the deduped catalog of every CI image this run
+        # references (for naming + pulling): GHA's matrix expansion projected down
+        # to (supported_platforms, rocm_versions) so test-only axes (CXX, compiler)
+        # don't multiply images. The build-set step below derives what to build.
+        # Note that full_CI_images_matrix is in include-only form.
         run: |
           ci_matrix=$(
             jq -c --null-input \
@@ -159,23 +154,6 @@ jobs:
           echo "hipFile Full CI Images Matrix: "
           echo "${full_CI_images_matrix}" | jq .
           echo "full_CI_images_matrix=${full_CI_images_matrix}" >> ${GITHUB_OUTPUT}
-
-          # build_CI_images_matrix drives which images are actually (re)built this
-          # run. When a Dockerfile changed we rebuild everything; otherwise only
-          # the nightly rows, whose target moves daily and so cannot be served
-          # from a pre-existing latest tag. (Other versions reuse their
-          # latest-rocm<ver> image.)
-          if [ "${CHANGED_DOCKERFILE}" = "1" ]; then
-            build_CI_images_matrix="${full_CI_images_matrix}"
-          else
-            build_CI_images_matrix=$(
-              printf '%s' "${full_CI_images_matrix}" \
-                | jq -c '{include: [.include[] | select(.rocm_versions == "nightly")]}'
-            )
-          fi
-          echo "hipFile Build CI Images Matrix: "
-          echo "${build_CI_images_matrix}" | jq .
-          echo "build_CI_images_matrix=${build_CI_images_matrix}" >> ${GITHUB_OUTPUT}
       - name: Resolve ROCm nightly metadata
         id: nightly
         working-directory: rocm-systems/projects/hipfile
@@ -259,10 +237,62 @@ jobs:
           echo "List of CI Images: "
           echo "${ci_images}" | jq .
           echo "ci_images=${ci_images}" >> "${GITHUB_OUTPUT}"
+      - name: Compute images to build
+        id: build-ci-images-matrix
+        env:
+          CHANGED_DOCKERFILE: ${{ steps.ci-flags.outputs.changed_dockerfile }}
+          FULL_CI_IMAGES_MATRIX: ${{ steps.matrices.outputs.full_CI_images_matrix }}
+          CI_IMAGES: ${{ steps.ci-images.outputs.ci_images }}
+        # A Dockerfile change rebuilds the whole catalog; otherwise only nightly
+        # rows may need building (other versions reuse latest-rocm<ver> from
+        # hipfile-image-update.yml). A nightly row is built only when its
+        # base+nvidia images aren't already published by
+        # hipfile-image-update-nightly.yml -- so in the common case (no Dockerfile
+        # change, nightly already published) the build set is empty and the
+        # build_CI_image job is skipped entirely.
+        run: |
+          if [ "${CHANGED_DOCKERFILE}" = "1" ]; then
+            build_CI_images_matrix="${FULL_CI_IMAGES_MATRIX}"
+          else
+            nightly_matrix=$(
+              printf '%s' "${FULL_CI_IMAGES_MATRIX}" \
+                | jq -c '{include: [.include[] | select(.rocm_versions == "nightly")]}'
+            )
+
+            # Record which nightly images are not published in GHCR.
+            # Convert the JSON nightly keys to a Bash space-delimited string so that
+            # we can check the image refs with Docker.
+            to_build=""
+            for key in $(printf '%s' "${nightly_matrix}" \
+                | jq -r '.include[] | "\(.supported_platforms)-\(.rocm_versions)"'); do
+              img=$(printf '%s' "${CI_IMAGES}" | jq -r --arg k "${key}" '.[$k].ci_image')
+              img_nvidia=$(printf '%s' "${CI_IMAGES}" | jq -r --arg k "${key}" '.[$k].ci_image_nvidia')
+              if ! docker buildx imagetools inspect "${img}" >/dev/null 2>&1 \
+                 || ! docker buildx imagetools inspect "${img_nvidia}" >/dev/null 2>&1; then
+                echo "Nightly image not yet published, will build: ${key}"
+                to_build="${to_build}${key} "
+              fi
+            done
+
+            # The bulk of this command is to convert the Bash space-delimited
+            # string (back) to a JSON string made up of the nightly images that
+            # are not yet built.
+            build_CI_images_matrix=$(
+              printf '%s' "${nightly_matrix}" \
+                | jq -c --arg tb "${to_build}" \
+                    '($tb | split(" ") | map(select(length > 0))) as $b
+                     | {include: [.include[]
+                         | select((.supported_platforms + "-" + .rocm_versions) as $k | $b | index($k))]}'
+            )
+          fi
+          echo "hipFile Build CI Images Matrix: "
+          echo "${build_CI_images_matrix}" | jq .
+          echo "build_CI_images_matrix=${build_CI_images_matrix}" >> "${GITHUB_OUTPUT}"
 
   build_CI_image:
-    # build_CI_images_matrix is non-empty when a Dockerfile changed or a nightly
-    # row exists; otherwise it has no include rows and this job produces no jobs.
+    # build_CI_images_matrix is empty when there's nothing to (re)build (no
+    # Dockerfile change and every nightly image already published). An empty
+    # include yields zero matrix jobs, so this job is skipped.
     if: ${{ fromJSON(needs.Precheck.outputs.build_CI_images_matrix).include[0] != null }}
     needs: Precheck
     permissions:
