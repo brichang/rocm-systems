@@ -50,6 +50,13 @@ public:
     // Buffer callback fan-in: decode PC sample records and append to the store.
     void on_pc_sample_records(rocprofiler_record_header_t** headers, size_t num_headers);
 
+    // Drain the LOSSLESS delivery buffer so any samples still below the
+    // watermark are handed to on_pc_sample_records() before finalize()
+    // serializes the store. No-op when configure() set up no buffer (disabled
+    // mode or no matching agent). Must run after the context is stopped and
+    // before finalize().
+    void flush(SdkWrapper& sdk);
+
     void on_code_object_load(const rocprofiler_callback_tracing_code_object_load_data_t& info);
     void finalize();
 

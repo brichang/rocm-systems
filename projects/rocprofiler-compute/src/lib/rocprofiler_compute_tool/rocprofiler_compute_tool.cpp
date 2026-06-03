@@ -184,7 +184,13 @@ void generate_output(tool_data_t* tool_data)
     }
 
     if (tool_data->pc_sampling.enabled())
+    {
+        // The context is stopped by tool_fini before generate_output runs.
+        // Drain the LOSSLESS delivery buffer so samples still below the
+        // watermark reach the record store before finalize() serializes it.
+        tool_data->pc_sampling.flush(*g_sdk_wrapper);
         tool_data->pc_sampling.finalize();
+    }
 }
 
 void tool_fini(void* user_data)

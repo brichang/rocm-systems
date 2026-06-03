@@ -301,6 +301,70 @@ TEST(pc_sampling_feature_configure_t, SdkQueryFailureDegradesGracefully)
 }
 
 // ---------------------------------------------------------------------------
+// flush() — drains the configured delivery buffer; no-op when none configured.
+// ---------------------------------------------------------------------------
+
+TEST(pc_sampling_feature_flush_t, FlushDrainsConfiguredBuffer)
+{
+    MockSdkWrapper sdk;
+    sdk.set_pc_sampling_agent(/*agent_handle=*/5);
+    sdk.add_pc_sampling_config(make_config(ROCPROFILER_PC_SAMPLING_METHOD_STOCHASTIC,
+                                           ROCPROFILER_PC_SAMPLING_UNIT_CYCLES));
+
+    pc_sampling_feature_t feature(PcSamplingMode::Stochastic,
+                                  /*interval=*/256,
+                                  /*unit=*/"",
+                                  "code_obj.json",
+                                  "ps_file.json");
+
+    rocprofiler_context_id_t ctx{42};
+    int                      user_data = 0;
+    ASSERT_TRUE(feature.configure(ctx, sdk, &user_data));
+    ASSERT_EQ(sdk.get_create_buffer_info().size(), 1u);
+
+    feature.flush(sdk);
+
+    // The exact buffer id the mock handed back from create_buffer is flushed.
+    ASSERT_EQ(sdk.get_flushed_buffers().size(), 1u);
+    EXPECT_EQ(sdk.get_flushed_buffers()[0], sdk.get_configure_pc_sampling_service_info()[0].buffer);
+}
+
+TEST(pc_sampling_feature_flush_t, FlushWithNoMatchingAgentIsNoOp)
+{
+    MockSdkWrapper sdk;
+    sdk.set_pc_sampling_agent(/*agent_handle=*/5);
+    // Agent advertises only host_trap, but stochastic is requested -> no match,
+    // so configure() sets up no buffer.
+    sdk.add_pc_sampling_config(
+        make_config(ROCPROFILER_PC_SAMPLING_METHOD_HOST_TRAP, ROCPROFILER_PC_SAMPLING_UNIT_TIME));
+
+    pc_sampling_feature_t feature(PcSamplingMode::Stochastic,
+                                  /*interval=*/256,
+                                  /*unit=*/"",
+                                  "code_obj.json",
+                                  "ps_file.json");
+
+    rocprofiler_context_id_t ctx{1};
+    ASSERT_FALSE(feature.configure(ctx, sdk, nullptr));
+
+    feature.flush(sdk);
+
+    EXPECT_TRUE(sdk.get_flushed_buffers().empty());
+}
+
+TEST(pc_sampling_feature_flush_t, FlushOnDisabledFeatureIsNoOp)
+{
+    MockSdkWrapper sdk;
+
+    // Default-constructed feature is Disabled and was never configured.
+    pc_sampling_feature_t feature;
+
+    feature.flush(sdk);
+
+    EXPECT_TRUE(sdk.get_flushed_buffers().empty());
+}
+
+// ---------------------------------------------------------------------------
 // on_pc_sample_records() — record routing into the store (observed via the
 // ps_file JSON written by finalize()).
 // ---------------------------------------------------------------------------

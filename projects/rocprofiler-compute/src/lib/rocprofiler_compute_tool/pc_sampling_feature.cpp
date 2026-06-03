@@ -323,6 +323,15 @@ void pc_sampling_feature_t::on_pc_sample_records(rocprofiler_record_header_t** h
     }
 }
 
+void pc_sampling_feature_t::flush(SdkWrapper& sdk)
+{
+    // configure() leaves m_buffer_id at its default {0} when it set up no SDK
+    // service (disabled mode or no matching agent); nothing to drain then.
+    if (m_buffer_id.handle == 0)
+        return;
+    sdk.flush_buffer(m_buffer_id);
+}
+
 void pc_sampling_feature_t::finalize()
 {
     // Existing behavior: write the code object info JSON + copy source files.
