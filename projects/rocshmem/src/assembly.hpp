@@ -1210,7 +1210,7 @@ struct AsmAccess<1, LoadPolicy, StorePolicy> {
 };
 
 __device__ __forceinline__ void wait_on_vmem_loads([[maybe_unused]] int waits) {
-#if defined(__gfx1201__)
+#if defined(__gfx1201__) || defined(__gfx1250__)
   switch (waits) {
     case 15: asm volatile("s_wait_loadcnt 15" ::: "memory"); break;
     case 14: asm volatile("s_wait_loadcnt 14" ::: "memory"); break;
@@ -1229,7 +1229,8 @@ __device__ __forceinline__ void wait_on_vmem_loads([[maybe_unused]] int waits) {
     case 1:  asm volatile("s_wait_loadcnt 1"  ::: "memory"); break;
     default: asm volatile("s_wait_loadcnt 0"  ::: "memory"); break;
   }
-#elif defined(__gfx90a__) || defined(__gfx942__) || defined(__gfx950__)
+#elif defined(__gfx90a__) || defined(__gfx942__) || \
+      defined(__gfx950__) || defined(__gfx1100__)
   switch (waits) {
     case 15: asm volatile("s_waitcnt vmcnt(15)" ::: "memory"); break;
     case 14: asm volatile("s_waitcnt vmcnt(14)" ::: "memory"); break;
@@ -1252,7 +1253,7 @@ __device__ __forceinline__ void wait_on_vmem_loads([[maybe_unused]] int waits) {
 }
 
 __device__ __forceinline__ void wait_on_vmem_stores([[maybe_unused]] int waits) {
-#if defined(__gfx1201__)
+#if defined(__gfx1201__) || defined(__gfx1250__)
   switch (waits) {
     case 15: asm volatile("s_wait_storecnt 15" ::: "memory"); break;
     case 14: asm volatile("s_wait_storecnt 14" ::: "memory"); break;
@@ -1271,7 +1272,8 @@ __device__ __forceinline__ void wait_on_vmem_stores([[maybe_unused]] int waits) 
     case 1:  asm volatile("s_wait_storecnt 1"  ::: "memory"); break;
     default: asm volatile("s_wait_storecnt 0"  ::: "memory"); break;
   }
-#elif defined(__gfx90a__) || defined(__gfx942__) || defined(__gfx950__)
+#elif defined(__gfx90a__) || defined(__gfx942__) || \
+      defined(__gfx950__) || defined(__gfx1100__)
   switch (waits) {
     case 15: asm volatile("s_waitcnt vmcnt(15)" ::: "memory"); break;
     case 14: asm volatile("s_waitcnt vmcnt(14)" ::: "memory"); break;
@@ -1294,18 +1296,19 @@ __device__ __forceinline__ void wait_on_vmem_stores([[maybe_unused]] int waits) 
 }
 
 __device__ __forceinline__ void wait_on_vmem([[maybe_unused]] int waits) {
-#if defined(__gfx1201__)
+#if defined(__gfx1201__) || defined(__gfx1250__)
   // GFX12 has no unified vmcnt; issue both load and store waits separately.
   wait_on_vmem_loads(waits);
   wait_on_vmem_stores(waits);
-#elif defined(__gfx90a__) || defined(__gfx942__) || defined(__gfx950__)
+#elif defined(__gfx90a__) || defined(__gfx942__) || \
+      defined(__gfx950__) || defined(__gfx1100__)
   wait_on_vmem_loads(waits);  // vmcnt covers both loads and stores on GFX9
 #endif
 }
 
 // Waits for all in-flight vector memory operations and LDS operations to complete.
 __device__ __forceinline__ void wait_on_vmem_and_lds([[maybe_unused]] int waits) {
-#if defined(__gfx1201__)
+#if defined(__gfx1201__) || defined(__gfx1250__)
   // GFX12 splits counters: loads, stores, and DS (LDS) are tracked separately.
   wait_on_vmem_loads(waits);
   wait_on_vmem_stores(waits);
@@ -1327,7 +1330,8 @@ __device__ __forceinline__ void wait_on_vmem_and_lds([[maybe_unused]] int waits)
     case 1:  asm volatile("s_wait_dscnt 1"  ::: "memory"); break;
     default: asm volatile("s_wait_dscnt 0"  ::: "memory"); break;
   }
-#elif defined(__gfx90a__) || defined(__gfx942__) || defined(__gfx950__)
+#elif defined(__gfx90a__) || defined(__gfx942__) || \
+      defined(__gfx950__) || defined(__gfx1100__)
   // vmcnt covers both loads and stores; lgkmcnt covers LDS (DS) operations.
   switch (waits) {
     case 15: asm volatile("s_waitcnt vmcnt(15) lgkmcnt(15)" ::: "memory"); break;
