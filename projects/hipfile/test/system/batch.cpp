@@ -10,13 +10,17 @@
 
 #include <algorithm>
 #include <array>
+#include <cerrno>
+#include <csignal>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <gtest/gtest.h>
 #include <hip/hip_runtime_api.h>
 #include <numeric>
 #include <optional>
+#include <sys/resource.h>
 #include <sys/types.h>
 #include <unistd.h>
 #include <unordered_map>
@@ -172,6 +176,66 @@ struct BatchTest : public testing::Test {
     }
 };
 
+struct BatchWriteFailureTest : public BatchTest {
+    void SetUp() override
+    {
+#if defined(__HIP_PLATFORM_NVIDIA__)
+        // This fixture has a test that constrains process file writes. Keep cuFile logging out
+        // of that limit so only the target I/O sees the failure.
+        ASSERT_EQ(setenv("CUFILE_LOGFILE_PATH", "/dev/null", 1), 0);
+#endif
+        BatchTest::SetUp();
+    }
+};
+
+struct ScopedSignalAction {
+    int ignore(int signal_number_)
+    {
+        signal_number = signal_number_;
+        old_handler  = std::signal(signal_number, SIG_IGN);
+        active       = old_handler != SIG_ERR;
+        return active ? 0 : -1;
+    }
+
+    ~ScopedSignalAction()
+    {
+        if (active) {
+            (void)std::signal(signal_number, old_handler);
+        }
+    }
+
+    using SignalHandler = void (*)(int);
+
+    int           signal_number{};
+    SignalHandler old_handler{SIG_DFL};
+    bool          active{};
+};
+
+struct ScopedFileSizeLimit {
+    int limit(rlim_t soft_limit)
+    {
+        if (getrlimit(RLIMIT_FSIZE, &old_limit) != 0) {
+            return -1;
+        }
+
+        struct rlimit new_limit = old_limit;
+        new_limit.rlim_cur      = soft_limit;
+        const int status        = setrlimit(RLIMIT_FSIZE, &new_limit);
+        active                  = status == 0;
+        return status;
+    }
+
+    ~ScopedFileSizeLimit()
+    {
+        if (active) {
+            (void)setrlimit(RLIMIT_FSIZE, &old_limit);
+        }
+    }
+
+    struct rlimit old_limit {};
+    bool          active{};
+};
+
 } // namespace
 
 HIPFILE_WARN_NO_GLOBAL_CTOR_OFF
@@ -250,6 +314,36 @@ TEST_F(BatchTest, BatchWriteMultipleOperations)
     const auto events = waitForEvents(ops.size());
     expectCompleteEvents(events, ops.size());
     ASSERT_EQ(read_all(tmpfile.fd, file_size, 0), input);
+}
+
+TEST_F(BatchWriteFailureTest, FailedBatchWriteReportsErrorInEventRet)
+{
+    ScopedSignalAction xfsz;
+    ASSERT_EQ(xfsz.ignore(SIGXFSZ), 0);
+
+    ScopedFileSizeLimit file_size_limit;
+    ASSERT_EQ(file_size_limit.limit(static_cast<rlim_t>(file_size)), 0);
+
+    setupBatch(1);
+    auto op                = makeOp(0, hipFileBatchWrite);
+    op.u.batch.file_offset = static_cast<int64_t>(file_size);
+
+    ASSERT_EQ(hipFileBatchIOSubmit(batch_handle, 1, &op, 0), HIPFILE_SUCCESS);
+
+    const auto events = waitForEvents(1);
+    ASSERT_EQ(events.size(), 1);
+
+    const auto &event = events[0];
+    ASSERT_EQ(event.cookie, &cookies[0]);
+    EXPECT_EQ(event.status, hipFileFailed);
+
+#if defined(__HIP_PLATFORM_NVIDIA__)
+    const auto expected_ret = -static_cast<ssize_t>(EIO);
+#else
+    const auto expected_ret = -static_cast<ssize_t>(EFBIG);
+#endif
+    EXPECT_EQ(static_cast<ssize_t>(event.ret), expected_ret);
+    EXPECT_EQ(event.ret, static_cast<size_t>(expected_ret));
 }
 
 TEST_F(BatchTest, GetStatusWithSmallEventBufferReturnsRemainingEventsLater)
