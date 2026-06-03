@@ -51,6 +51,7 @@ from utils.parser import (
     PC_SAMPLING_NOT_ISSUE_PREFIX,
     load_code_obj_info,
     match_instruction_for_offset,
+    parse_waitcnt_dependencies,
     resolve_source_file,
     split_instruction_comment,
 )
@@ -526,6 +527,21 @@ class db_analysis(OmniAnalyze_Base):
                 # effort (spec non-goal "No new analysis database schema").
                 for col, values in native_columns.items():
                     grouped_df[col] = values
+                # Per-row s_waitcnt producer dependencies, derived from the
+                # native disassembly. Computed once per code object, then mapped
+                # by (code_object_id, code_object_offset) while those columns
+                # still exist (before the rename/drop below). Lives only on the
+                # returned DataFrame; not persisted via the ORM.
+                deps_by_coid = {
+                    coid: parse_waitcnt_dependencies(intervals)
+                    for coid, intervals in code_obj_info.items()
+                }
+                grouped_df["dependencies"] = grouped_df.apply(
+                    lambda r: deps_by_coid.get(r["code_object_id"], {}).get(
+                        r["code_object_offset"], []
+                    ),
+                    axis=1,
+                )
             else:
                 # Fallback path: native *_code_obj_info.json not found; use the
                 # rocprofiler-sdk strings indexed by inst_index.
@@ -549,6 +565,10 @@ class db_analysis(OmniAnalyze_Base):
                 )
                 grouped_df["source_file"] = None
                 grouped_df["line"] = None
+                # No native disassembly: dependency analysis is unavailable, but
+                # keep the column present (empty list per row) so the contract is
+                # stable across both paths.
+                grouped_df["dependencies"] = [[] for _ in range(len(grouped_df))]
 
             grouped_df["kernel_name"] = grouped_df["code_object_id"].apply(
                 lambda x: pc_sampling_kernel_name_dict.get(x)

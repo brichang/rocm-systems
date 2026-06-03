@@ -1106,6 +1106,129 @@ def match_instruction_for_offset(
     return None
 
 
+# Mnemonic prefixes that INCREMENT (produce) each hardware wait counter. A
+# producer instruction issued before an ``s_waitcnt`` keeps the counter above
+# zero until it retires, so the waitcnt depends on it. Membership is tunable
+# here without changing the public contract of parse_waitcnt_dependencies.
+_WAITCNT_PRODUCER_PREFIXES: dict[str, tuple[str, ...]] = {
+    # Vector-memory ops bump vmcnt: flat/buffer/global/scratch loads & stores
+    # plus image loads.
+    "vmcnt": ("flat_", "buffer_", "global_", "scratch_", "image_"),
+    # LDS/GDS and scalar-memory ops bump lgkmcnt.
+    "lgkmcnt": ("ds_", "gds_", "s_load", "s_buffer_load", "s_scratch_load"),
+    # Export / parameter writes bump expcnt.
+    "expcnt": ("exp",),
+}
+
+# Regex pulling explicit counter targets from a combined waitcnt operand text,
+# e.g. "s_waitcnt vmcnt(0) lgkmcnt(0)".
+_WAITCNT_TARGET_RE = re.compile(r"(vmcnt|lgkmcnt|expcnt|vscnt)\((\d+)\)")
+# Regex pulling a bare integer operand from a class-specific waitcnt mnemonic,
+# e.g. "s_waitcnt_vmcnt 0".
+_WAITCNT_BARE_INT_RE = re.compile(r"\b(\d+)\b")
+
+# Map class-specific waitcnt mnemonic stems to the counter class they drain.
+# ``vscnt`` shares the vmcnt outstanding queue here (vector-store counter).
+_WAITCNT_CLASS_MNEMONICS: dict[str, str] = {
+    "s_waitcnt_vmcnt": "vmcnt",
+    "s_waitcnt_vscnt": "vmcnt",
+    "s_waitcnt_lgkmcnt": "lgkmcnt",
+    "s_waitcnt_expcnt": "expcnt",
+}
+
+
+def _classify_waitcnt(name: str) -> Optional[dict[str, int]]:
+    """Return the per-class target counts an s_waitcnt-family op waits FOR.
+
+    Returns e.g. ``{"vmcnt": 0}`` or ``{"vmcnt": 0, "lgkmcnt": 0}``; None when
+    ``name`` is not an s_waitcnt instruction. A class with no parseable target
+    drains fully (target 0).
+    """
+    lowered = name.lower().strip()
+    mnemonic = lowered.split()[0] if lowered else ""
+
+    # Class-specific mnemonics: target is the bare integer operand, default 0.
+    if mnemonic in _WAITCNT_CLASS_MNEMONICS:
+        klass = _WAITCNT_CLASS_MNEMONICS[mnemonic]
+        match = _WAITCNT_BARE_INT_RE.search(lowered[len(mnemonic) :])
+        target = int(match.group(1)) if match else 0
+        return {klass: target}
+
+    # Bare/combined "s_waitcnt vmcnt(N) lgkmcnt(N) expcnt(N)".
+    if mnemonic == "s_waitcnt":
+        targets: dict[str, int] = {}
+        for klass, value in _WAITCNT_TARGET_RE.findall(lowered):
+            # vscnt is a vmcnt-family counter for our outstanding queue.
+            targets[("vmcnt" if klass == "vscnt" else klass)] = int(value)
+        if not targets:
+            # No explicit operands: drain every class fully.
+            return {"vmcnt": 0, "lgkmcnt": 0, "expcnt": 0}
+        return targets
+
+    return None
+
+
+def _waitcnt_producer_classes(name: str) -> tuple[str, ...]:
+    """Return the counter classes a producer instruction increments (maybe none)."""
+    lowered = name.lower()
+    classes = tuple(
+        klass
+        for klass, prefixes in _WAITCNT_PRODUCER_PREFIXES.items()
+        if lowered.startswith(prefixes)
+    )
+    return classes
+
+
+def parse_waitcnt_dependencies(
+    instructions: list[dict[str, Any]],
+) -> dict[int, list[int]]:
+    """Map each s_waitcnt instruction's code_obj_offset to the sorted list of
+    producer instruction offsets (within this one symbol/code-object stream) it
+    waits on, derived from s_waitcnt-family instructions.
+
+    ``instructions`` is one code object's list, ascending by ``code_obj_offset``
+    (as produced by ``load_code_obj_info``). Returns ``{}`` when no waitcnt has
+    outstanding producers. Offsets with no dependencies are simply absent
+    (callers default to ``[]``). Never raises; malformed entries are skipped.
+    """
+    outstanding: dict[str, list[int]] = {"vmcnt": [], "lgkmcnt": [], "expcnt": []}
+    deps: dict[int, list[int]] = {}
+
+    for inst in instructions:
+        name = inst.get("name")
+        if not name:
+            # No mnemonic: cannot classify; leave queues untouched.
+            continue
+
+        offset = inst.get("code_obj_offset")
+        targets = _classify_waitcnt(name)
+
+        if targets is not None:
+            if offset is None:
+                continue
+            satisfied: set[int] = set()
+            for klass, target in targets.items():
+                queue = outstanding.get(klass)
+                if not queue:
+                    continue
+                keep_from = max(len(queue) - max(target, 0), 0)
+                satisfied.update(queue[:keep_from])
+                # Pop the now-complete producers off the front of the queue.
+                outstanding[klass] = queue[keep_from:]
+            if satisfied:
+                deps[offset] = sorted(satisfied)
+            continue
+
+        # Producer bookkeeping: record this instruction against each counter
+        # class it increments so a later waitcnt can depend on it.
+        if offset is None:
+            continue
+        for klass in _waitcnt_producer_classes(name):
+            outstanding[klass].append(offset)
+
+    return deps
+
+
 def nullify_unevaluated_metric_values(
     workload: schema.Workload,
 ) -> None:

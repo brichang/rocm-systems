@@ -112,9 +112,7 @@ class PCSamplingProfiler:
                     f"Failed to remove stale PC sampling output: {snapshot_dir}"
                 )
             else:
-                console_debug(
-                    f"Removed stale PC sampling output: {snapshot_dir}"
-                )
+                console_debug(f"Removed stale PC sampling output: {snapshot_dir}")
 
     def _launch(
         self,
