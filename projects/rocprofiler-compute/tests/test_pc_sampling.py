@@ -411,7 +411,9 @@ def test_pc_sampling_profiler_sdk_forwards_env_and_ld_preload(
         args = _make_sdk_args(output_dir, method, pc_sampling_interval=interval)
         options = rocprofiler_sdk_profiler(
             args, profiler_mode="rocprofiler-sdk", soc=None
-        ).get_profiler_options(pc_sampling=True)
+        ).get_profiler_options(
+            native_tool_path="/tmp/fake_native_tool.so", pc_sampling=True
+        )
 
         mock_capture_subprocess.return_value = (True, "Success output")
         profiler = _make_pc_sampling_profiler(
@@ -423,11 +425,16 @@ def test_pc_sampling_profiler_sdk_forwards_env_and_ld_preload(
         called_env = mock_capture_subprocess.call_args.kwargs.get("new_env", {})
 
         assert args.rocprofiler_sdk_tool_path in called_env["LD_PRELOAD"]
-        assert called_env["ROCPROF_PC_SAMPLING_METHOD"] == method
-        assert called_env["ROCPROF_PC_SAMPLING_UNIT"] == expected_unit
-        assert called_env["ROCPROF_PC_SAMPLING_INTERVAL"] == str(interval)
+        # Native-only PC sampling env vars (the native tool is the record writer).
+        assert called_env["ROCPROF_NATIVE_PC_SAMPLING_METHOD"] == method
+        assert called_env["ROCPROF_NATIVE_PC_SAMPLING_UNIT"] == expected_unit
+        assert called_env["ROCPROF_NATIVE_PC_SAMPLING_INTERVAL"] == str(interval)
+        assert called_env["ROCPROF_PC_SAMPLING_ENABLED"] == "1"
         assert called_env["ROCPROF_OUTPUT_PATH"] == str(output_dir)
-        assert called_env["ROCPROF_OUTPUT_FILE_NAME"] == "ps_file"
+        # The SDK standard tool's PC pass stays off: its method/output-file keys
+        # must be absent so exactly one ps_file_results.json is produced.
+        assert "ROCPROF_PC_SAMPLING_METHOD" not in called_env
+        assert "ROCPROF_OUTPUT_FILE_NAME" not in called_env
 
         mock_console_error.assert_not_called()
     finally:
@@ -1044,14 +1051,43 @@ def test_get_profiler_options_pc_sampling_true_adds_env_vars(method, expected_un
         options = profiler.get_profiler_options(
             native_tool_path="/tmp/fake_native_tool.so", pc_sampling=True
         )
-        assert options["ROCPROF_PC_SAMPLING_METHOD"] == method
-        assert options["ROCPROF_PC_SAMPLING_INTERVAL"] == "4096"
-        assert options["ROCPROF_PC_SAMPLING_UNIT"] == expected_unit
-        assert options["ROCPROFILER_PC_SAMPLING_BETA_ENABLED"] == "1"
+        assert options["ROCPROF_NATIVE_PC_SAMPLING_METHOD"] == method
+        assert options["ROCPROF_NATIVE_PC_SAMPLING_INTERVAL"] == "4096"
+        assert options["ROCPROF_NATIVE_PC_SAMPLING_UNIT"] == expected_unit
+        assert options["ROCPROF_PC_SAMPLING_ENABLED"] == "1"
         # No PMC collection on the PC sampling run.
         assert options["ROCPROF_COUNTER_COLLECTION"] == "0"
         # Native tool still gets onto LD_PRELOAD alongside the SDK tool.
         assert "/tmp/fake_native_tool.so" in options["LD_PRELOAD"]
+        # The SDK standard tool's PC pass is disabled: leaving these unset means
+        # only the native tool writes ps_file_results.json (single writer).
+        for sdk_key in (
+            "ROCPROF_PC_SAMPLING_METHOD",
+            "ROCPROF_PC_SAMPLING_UNIT",
+            "ROCPROF_PC_SAMPLING_INTERVAL",
+            "ROCPROF_OUTPUT_FILE_NAME",
+        ):
+            assert sdk_key not in options
+    finally:
+        common.clean_output_dir(True, str(output_dir))
+
+
+def test_get_profiler_options_pc_sampling_requires_native_tool():
+    """pc_sampling=True without a native tool path errors: the native tool is
+    the only PC sampling record writer, so its absence must not silently produce
+    a run that collects no records."""
+    output_dir = Path(common.get_output_dir())
+    output_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        args = _make_sdk_args(output_dir, "stochastic", pc_sampling_interval=4096)
+        profiler = rocprofiler_sdk_profiler(
+            args, profiler_mode="rocprofiler-sdk", soc=None
+        )
+        with mock.patch(
+            "rocprof_compute_profile.profiler_rocprofiler_sdk.console_error"
+        ) as mock_console_error:
+            profiler.get_profiler_options(native_tool_path=None, pc_sampling=True)
+            assert mock_console_error.called
     finally:
         common.clean_output_dir(True, str(output_dir))
 
@@ -1070,7 +1106,10 @@ def test_get_profiler_options_pc_sampling_false_preserves_pmc_behavior():
             "ROCPROF_PC_SAMPLING_METHOD",
             "ROCPROF_PC_SAMPLING_INTERVAL",
             "ROCPROF_PC_SAMPLING_UNIT",
-            "ROCPROFILER_PC_SAMPLING_BETA_ENABLED",
+            "ROCPROF_NATIVE_PC_SAMPLING_METHOD",
+            "ROCPROF_NATIVE_PC_SAMPLING_INTERVAL",
+            "ROCPROF_NATIVE_PC_SAMPLING_UNIT",
+            "ROCPROF_PC_SAMPLING_ENABLED",
         ):
             assert key not in options
         # PMC path: counter collection stays on (SDK collects).
@@ -1118,13 +1157,16 @@ def test_pc_sampling_native_tool_reaches_subprocess_env(
         # still collected by the sdk tool.
         assert native_tool in called_env["LD_PRELOAD"]
         assert args.rocprofiler_sdk_tool_path in called_env["LD_PRELOAD"]
-        # PC sampling env vars survive into the subprocess.
-        assert called_env["ROCPROF_PC_SAMPLING_METHOD"] == "host_trap"
-        assert called_env["ROCPROF_PC_SAMPLING_INTERVAL"] == "4096"
-        assert called_env["ROCPROF_PC_SAMPLING_UNIT"] == "time"
-        assert called_env["ROCPROFILER_PC_SAMPLING_BETA_ENABLED"] == "1"
+        # Native-only PC sampling env vars survive into the subprocess; the
+        # native tool is the sole record writer.
+        assert called_env["ROCPROF_NATIVE_PC_SAMPLING_METHOD"] == "host_trap"
+        assert called_env["ROCPROF_NATIVE_PC_SAMPLING_INTERVAL"] == "4096"
+        assert called_env["ROCPROF_NATIVE_PC_SAMPLING_UNIT"] == "time"
+        assert called_env["ROCPROF_PC_SAMPLING_ENABLED"] == "1"
         assert called_env["ROCPROF_COUNTER_COLLECTION"] == "0"
-        assert called_env["ROCPROF_OUTPUT_FILE_NAME"] == "ps_file"
+        # SDK standard tool's PC pass disabled: no method/output-file keys.
+        assert "ROCPROF_PC_SAMPLING_METHOD" not in called_env
+        assert "ROCPROF_OUTPUT_FILE_NAME" not in called_env
         # PC sampling output lands in the workload dir, not out/pmc_1.
         assert called_env["ROCPROF_OUTPUT_PATH"] == str(output_dir)
         mock_console_error.assert_not_called()

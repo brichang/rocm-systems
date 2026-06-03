@@ -56,9 +56,9 @@ std::string_view MockInputParameters::get_pc_sampling_unit()
     return std::string_view{m_pc_sampling_unit};
 }
 
-std::string_view MockInputParameters::get_pc_sampling_beta_enabled()
+std::string_view MockInputParameters::get_pc_sampling_enabled()
 {
-    return std::string_view{m_pc_sampling_beta_enabled};
+    return std::string_view{m_pc_sampling_enabled};
 }
 
 void MockInputParameters::set_pc_sampling_method(const std::string& method)
@@ -76,9 +76,9 @@ void MockInputParameters::set_pc_sampling_unit(const std::string& unit)
     m_pc_sampling_unit = unit;
 }
 
-void MockInputParameters::set_pc_sampling_beta_enabled(const std::string& value)
+void MockInputParameters::set_pc_sampling_enabled(const std::string& value)
 {
-    m_pc_sampling_beta_enabled = value;
+    m_pc_sampling_enabled = value;
 }
 
 void MockInputParameters::set_output_path(const std::string& output_path)

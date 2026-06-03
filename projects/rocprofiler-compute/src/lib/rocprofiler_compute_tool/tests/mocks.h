@@ -24,7 +24,7 @@ public:
     std::string_view get_pc_sampling_method() override;
     std::string_view get_pc_sampling_interval() override;
     std::string_view get_pc_sampling_unit() override;
-    std::string_view get_pc_sampling_beta_enabled() override;
+    std::string_view get_pc_sampling_enabled() override;
 
     void set_output_path(const std::string& output_path);
     void set_requested_counters(const std::string& counters);
@@ -34,7 +34,7 @@ public:
     void set_pc_sampling_method(const std::string& method);
     void set_pc_sampling_interval(const std::string& interval);
     void set_pc_sampling_unit(const std::string& unit);
-    void set_pc_sampling_beta_enabled(const std::string& value);
+    void set_pc_sampling_enabled(const std::string& value);
 
     void unset_output_path();
     void unset_requested_counters();
@@ -52,7 +52,7 @@ private:
     std::string m_pc_sampling_method;
     std::string m_pc_sampling_interval;
     std::string m_pc_sampling_unit;
-    std::string m_pc_sampling_beta_enabled;
+    std::string m_pc_sampling_enabled;
 
     bool m_output_path_set                 = true;
     bool m_requested_counters_set          = true;

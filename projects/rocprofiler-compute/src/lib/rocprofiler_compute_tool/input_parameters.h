@@ -22,7 +22,7 @@ public:
     virtual std::string_view get_pc_sampling_method()          = 0;
     virtual std::string_view get_pc_sampling_interval()        = 0;
     virtual std::string_view get_pc_sampling_unit()            = 0;
-    virtual std::string_view get_pc_sampling_beta_enabled()    = 0;
+    virtual std::string_view get_pc_sampling_enabled()         = 0;
 };
 
 class EnvInputParameters : public InputParameters
@@ -36,7 +36,7 @@ public:
     static constexpr std::string_view kDefaultPcSamplingMethod{""};
     static constexpr std::string_view kDefaultPcSamplingInterval{""};
     static constexpr std::string_view kDefaultPcSamplingUnit{""};
-    static constexpr std::string_view kDefaultPcSamplingBetaEnabled{""};
+    static constexpr std::string_view kDefaultPcSamplingEnabled{""};
 
     explicit EnvInputParameters(std::shared_ptr<const EnvironCache> environ = EnvironCache::instance());
     std::string_view get_output_path() override;
@@ -47,7 +47,7 @@ public:
     std::string_view get_pc_sampling_method() override;
     std::string_view get_pc_sampling_interval() override;
     std::string_view get_pc_sampling_unit() override;
-    std::string_view get_pc_sampling_beta_enabled() override;
+    std::string_view get_pc_sampling_enabled() override;
 
 private:
     std::string_view get(std::string_view env_var_name, std::string_view default_value);

@@ -61,7 +61,7 @@ std::string_view EnvInputParameters::get_pc_sampling_unit()
     return get("ROCPROF_NATIVE_PC_SAMPLING_UNIT", kDefaultPcSamplingUnit);
 }
 
-std::string_view EnvInputParameters::get_pc_sampling_beta_enabled()
+std::string_view EnvInputParameters::get_pc_sampling_enabled()
 {
-    return get("ROCPROF_PC_SAMPLING_ENABLED", kDefaultPcSamplingBetaEnabled);
+    return get("ROCPROF_PC_SAMPLING_ENABLED", kDefaultPcSamplingEnabled);
 }

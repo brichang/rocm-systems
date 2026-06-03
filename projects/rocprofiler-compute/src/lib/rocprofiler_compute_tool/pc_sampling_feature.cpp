@@ -273,8 +273,6 @@ void pc_sampling_feature_t::on_pc_sample_records(rocprofiler_record_header_t** h
             record.code_object_offset = sample->pc.code_object_offset;
             record.wave_issued        = static_cast<int>(sample->wave_issued);
             record.dispatch_id        = sample->dispatch_id;
-            record.timestamp          = sample->timestamp;
-            record.exec_mask          = sample->exec_mask;
             record.inst_type          = safe_name(rocprofiler_get_pc_sampling_instruction_type_name(
                 static_cast<rocprofiler_pc_sampling_instruction_type_t>(sample->inst_type)));
             record.stall_reason = safe_name(rocprofiler_get_pc_sampling_instruction_not_issued_reason_name(
@@ -293,8 +291,6 @@ void pc_sampling_feature_t::on_pc_sample_records(rocprofiler_record_header_t** h
             record.code_object_id     = sample->pc.code_object_id;
             record.code_object_offset = sample->pc.code_object_offset;
             record.dispatch_id        = sample->dispatch_id;
-            record.timestamp          = sample->timestamp;
-            record.exec_mask          = sample->exec_mask;
             m_record_store->add_host_trap(record);
         }
         // Skip unknown / invalid kinds.

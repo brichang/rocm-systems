@@ -197,3 +197,16 @@ def test_only_nonempty_deps_recorded_across_multiple_waits() -> None:
     ]
     deps = parse_waitcnt_dependencies(instructions)
     assert deps == {8: [0]}
+
+
+def test_combined_vmcnt_vscnt_drains_fully_regardless_of_operand_order() -> None:
+    """vscnt shares the vmcnt outstanding queue. A single s_waitcnt carrying
+    both vmcnt(N) and vscnt(0) must drain to the stricter target (0) no matter
+    which operand appears first, so the producer is always a dependency."""
+    for wait in ("s_waitcnt vscnt(0) vmcnt(2)", "s_waitcnt vmcnt(2) vscnt(0)"):
+        instructions = [
+            _inst(0, "global_load_dwordx4 v[0:3], v[4:5]"),
+            _inst(8, wait),
+        ]
+        deps = parse_waitcnt_dependencies(instructions)
+        assert deps.get(8) == [0], f"operand order {wait!r} under-drained: {deps}"

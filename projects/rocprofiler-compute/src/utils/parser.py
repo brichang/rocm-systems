@@ -1158,8 +1158,13 @@ def _classify_waitcnt(name: str) -> Optional[dict[str, int]]:
     if mnemonic == "s_waitcnt":
         targets: dict[str, int] = {}
         for klass, value in _WAITCNT_TARGET_RE.findall(lowered):
-            # vscnt is a vmcnt-family counter for our outstanding queue.
-            targets[("vmcnt" if klass == "vscnt" else klass)] = int(value)
+            # vscnt is a vmcnt-family counter for our outstanding queue. When a
+            # single waitcnt carries both vmcnt(N) and vscnt(M) they collide on
+            # this shared key, so keep the stricter (lower) target rather than
+            # letting operand order decide.
+            key = "vmcnt" if klass == "vscnt" else klass
+            target = int(value)
+            targets[key] = min(targets.get(key, target), target)
         if not targets:
             # No explicit operands: drain every class fully.
             return {"vmcnt": 0, "lgkmcnt": 0, "expcnt": 0}

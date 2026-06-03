@@ -25,10 +25,6 @@ struct pc_sample_record_t
 
     uint64_t dispatch_id = 0;
 
-    // Parity fields (not strictly required by the analyzer but carried through).
-    uint64_t timestamp = 0;
-    uint64_t exec_mask = 0;
-
     // Index into the instruction/comment string table, resolved by the writer
     // from code_object_id + code_object_offset. Defaults to -1 (unresolved).
     int inst_index = -1;
