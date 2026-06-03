@@ -399,31 +399,6 @@ jobs:
           dnf install -y curl
           ln -s /usr/local/bin/curl /usr/bin/curl
 
-      - name: Ensure OpenMPI is available
-        timeout-minutes: 10
-        shell: bash
-        run: |
-          if command -v mpirun >/dev/null 2>&1; then
-            echo "Using pre-installed MPI: $(command -v mpirun)"
-            exit 0
-          fi
-
-          if command -v dnf >/dev/null 2>&1; then
-            dnf install -y openmpi openmpi-devel
-          elif command -v zypper >/dev/null 2>&1; then
-            zypper --non-interactive install openmpi4 openmpi4-devel
-          fi
-
-          if ! command -v mpirun >/dev/null 2>&1; then
-            mpirun_path=$(find /usr -type f -name mpirun 2>/dev/null | head -n1)
-            if [ -n "${mpirun_path}" ]; then
-              mpi_bin=$(dirname "${mpirun_path}")
-              mpi_root=$(dirname "${mpi_bin}")
-              echo "${mpi_bin}" >> "$GITHUB_PATH"
-              echo "LD_LIBRARY_PATH=${mpi_root}/lib:${mpi_root}/lib64:${LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
-            fi
-          fi
-
       - name: Build ROCProfiler SDK Dependencies
         uses: ./.github/actions/rocprofiler-sdk-util
         with:
