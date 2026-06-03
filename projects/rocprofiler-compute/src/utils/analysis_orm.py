@@ -39,7 +39,7 @@ from sqlalchemy.sql import Select
 from utils.logger import console_debug, console_error, console_warning
 
 PREFIX = "compute_"
-SCHEMA_VERSION = "1.5.0"
+SCHEMA_VERSION = "1.4.0"
 
 
 Base = declarative_base()
@@ -105,6 +105,7 @@ class KernelRooflineData(Base):
     l1_cache_data = Column(Float)
     l2_cache_data = Column(Float)
     hbm_cache_data = Column(Float)
+    lds_cache_data = Column(Float)
 
     # Roofline data point can have one kernel
     kernel = relationship("Kernel", back_populates="roofline_data_points")
@@ -215,6 +216,7 @@ class WorkloadRooflineData(Base):
     l1_cache_data = Column(Float)
     l2_cache_data = Column(Float)
     hbm_cache_data = Column(Float)
+    lds_cache_data = Column(Float)
 
     # Relationships
     workload = relationship("Workload", back_populates="workload_roofline_data_points")

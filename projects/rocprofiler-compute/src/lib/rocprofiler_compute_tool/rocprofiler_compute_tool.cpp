@@ -10,9 +10,11 @@
 
 #include <unistd.h>
 
+#include <atomic>
 #include <fstream>
 #include <iostream>
 #include <sstream>
+#include <string_view>
 
 using namespace rocprofiler_compute_tool;
 
@@ -21,6 +23,8 @@ static std::shared_ptr<SdkWrapper>      g_sdk_wrapper      = std::make_shared<Sd
 static std::shared_ptr<SdkCallbacks> g_sdk_callbacks = std::make_shared<SdkCallbacksImpl>(g_sdk_wrapper);
 static std::shared_ptr<CountersWriter> g_counters_writer = std::make_shared<CsvCountersWriter>();
 static std::shared_ptr<rocprofiler_tool_configure_result_t> g_cfg;
+static std::atomic<bool>                                    g_tool_shutting_down{false};
+static std::atomic<bool>                                    g_hsa_intercept_done{false};
 
 void test_knobs::set_input_parameters(const std::shared_ptr<InputParameters>& input_parameters)
 {
@@ -40,6 +44,8 @@ void test_knobs::set_csv_writer(const std::shared_ptr<CountersWriter>& csv_write
 void test_knobs::reset_cfg()
 {
     g_cfg.reset();
+    g_tool_shutting_down.store(false, std::memory_order_release);
+    g_hsa_intercept_done.store(false, std::memory_order_release);
 }
 
 namespace rocprofiler_compute_tool
@@ -50,7 +56,7 @@ static rocprofiler_context_id_t& get_client_ctx()
     return ctx;
 }
 
-iteration_multiplexing_mode_t iteration_multiplexing_mode(const std::string& mode)
+iteration_multiplexing_mode_t iteration_multiplexing_mode(std::string_view mode)
 {
     if (mode == "kernel")
         return iteration_multiplexing_mode_t::KERNEL;
@@ -81,7 +87,46 @@ void tool_tracing_callback(rocprofiler_callback_tracing_record_t record,
                            rocprofiler_user_data_t* /*user_data*/,
                            void* callback_data)
 {
+    if (record.kind == ROCPROFILER_CALLBACK_TRACING_CODE_OBJECT &&
+        record.phase == ROCPROFILER_CALLBACK_PHASE_LOAD && record.operation == ROCPROFILER_CODE_OBJECT_LOAD)
+    {
+        assert(callback_data);
+        auto* tool_data = static_cast<std::unique_ptr<tool_data_t>*>(callback_data)->get();
+        if (tool_data->pc_sampling.enabled())
+        {
+            assert(record.payload);
+            const auto* obj_data = static_cast<rocprofiler_callback_tracing_code_object_load_data_t*>(
+                record.payload);
+            tool_data->pc_sampling.on_code_object_load(*obj_data);
+        }
+        return;
+    }
     g_sdk_callbacks->tool_tracing_callback(record, callback_data);
+}
+
+void on_hsa_runtime_loaded(rocprofiler_intercept_table_t /*type*/,
+                           uint64_t /*lib_version*/,
+                           uint64_t /*lib_instance*/,
+                           void** /*tables*/,
+                           uint64_t /*num_tables*/,
+                           void* user_data)
+{
+    // Counter collection and context start require HSA to be alive. Defer
+    // them until HSA actually loads so that LD_PRELOAD'd shells (which never
+    // touch HSA) do not initialize HSA worker threads, which would otherwise
+    // deadlock on fork() inside subshell/command-substitution.
+    if (g_tool_shutting_down.load(std::memory_order_acquire))
+        return;
+
+    if (g_hsa_intercept_done.exchange(true, std::memory_order_acq_rel))
+        return;
+
+    g_sdk_wrapper->configure_callback_dispatch_counting_service(get_client_ctx(),
+                                                                dispatch_callback,
+                                                                user_data,
+                                                                record_callback,
+                                                                user_data);
+    g_sdk_wrapper->start_context(get_client_ctx());
 }
 
 int tool_init(rocprofiler_client_finalize_t, void* user_data)
@@ -89,19 +134,12 @@ int tool_init(rocprofiler_client_finalize_t, void* user_data)
     std::clog << "[rocprofiler-compute] In tool init\n";
     g_sdk_wrapper->create_context(&get_client_ctx());
 
-    g_sdk_wrapper->configure_callback_dispatch_counting_service(get_client_ctx(),
-                                                                dispatch_callback,
-                                                                user_data,
-                                                                record_callback,
-                                                                user_data);
     g_sdk_wrapper->configure_callback_tracing_service(get_client_ctx(),
                                                       ROCPROFILER_CALLBACK_TRACING_CODE_OBJECT,
                                                       nullptr,
                                                       0,
                                                       tool_tracing_callback,
                                                       user_data);
-    g_sdk_wrapper->start_context(get_client_ctx());
-
     return 0;
 }
 
@@ -122,19 +160,18 @@ void generate_output(tool_data_t* tool_data)
                                                         }),
                                          tool_data->counter_records.end());
     }
-    if (tool_data->counter_records.empty())
-    {
-        return;
-    }
-    // Write collected counter records and clean up
-    if (!tool_data->output_filename.empty())
+    if (!tool_data->counter_records.empty() && !tool_data->output_filename.empty())
     {
         g_counters_writer->write_counters(tool_data);
     }
+
+    if (tool_data->pc_sampling.enabled())
+        tool_data->pc_sampling.finalize();
 }
 
 void tool_fini(void* user_data)
 {
+    g_tool_shutting_down.store(true, std::memory_order_release);
     assert(user_data);
     std::clog << "[rocprofiler-compute] In tool fini\n";
     rocprofiler_stop_context(get_client_ctx());
@@ -147,76 +184,76 @@ void tool_fini(void* user_data)
 
 }  // namespace rocprofiler_compute_tool
 
-static std::string generate_output_filename(const char* output_path)
+static std::string generate_output_filename(std::string_view output_path, std::string_view suffix)
 {
-    if (!output_path || !*output_path)
-    {
-        throw std::runtime_error("Output path is empty");
-    }
-    std::string filename = output_path;
+    std::string filename{output_path};
     if (filename.back() != '/')
         filename += '/';
-
-    std::string base_filename = std::to_string(getpid()) + "_native_counter_collection.csv";
-    return filename + base_filename;
+    filename += std::to_string(getpid());
+    filename.append(suffix);
+    return filename;
 }
 
 std::unique_ptr<tool_data_t> create_tool_data(rocprofiler_client_id_t* /*id*/)
 {
     auto tool_data = std::make_unique<tool_data_t>();
 
-    tool_data->output_filename = generate_output_filename(g_input_parameters->get_output_path());
+    const auto output_path = g_input_parameters->get_output_path();
+    tool_data->output_filename = generate_output_filename(output_path, "_native_counter_collection.csv");
+
+    if (!g_input_parameters->get_pc_sampling_beta_enabled().empty())
+    {
+        const auto pc_mode = parse_pc_sampling_mode(
+            std::string{g_input_parameters->get_pc_sampling_method()});
+        tool_data->pc_sampling =
+            pc_sampling_feature_t{pc_mode, generate_output_filename(output_path, "_code_obj_info.json")};
+    }
 
     // ROCPROF_COUNTERS env. var. is a string like "pmc: counter1 counter2 ..."
-    if (const char* v = g_input_parameters->get_requested_counters())
-        tool_data->requested_counters = v;
+    tool_data->requested_counters = std::string{g_input_parameters->get_requested_counters()};
 
-    if (const char* v = g_input_parameters->get_iteration_multiplexing_mode())
-        tool_data->iteration_multiplexing_mode = iteration_multiplexing_mode(v);
+    tool_data->iteration_multiplexing_mode = iteration_multiplexing_mode(
+        g_input_parameters->get_iteration_multiplexing_mode());
 
     // ROCPROF_KERNEL_FILTER_INCLUDE_REGEX env. var. is a regex string like
     // kernel_name_1|kernel_name_2|... Used to collect counters only for kernels
     // with names matching the regex
-    if (const char* v = g_input_parameters->get_kernel_filter_include_regex())
-        tool_data->kernel_filter_include_regex = v;
+    tool_data->kernel_filter_include_regex = std::string{
+        g_input_parameters->get_kernel_filter_include_regex()};
 
     // ROCPROF_KERNEL_FILTER_RANGE env. var. is a string like "[4,7-9,...]"
-    if (const char* v = g_input_parameters->get_kernel_filter_range())
+    std::string v_str{g_input_parameters->get_kernel_filter_range()};
+    // Remove square brackets at the ends if present
+    if (!v_str.empty() && v_str.front() == '[')
+        v_str.erase(0, 1);
+    if (!v_str.empty() && v_str.back() == ']')
+        v_str.pop_back();
+    // Parse the range string into vector of pairs
+    std::istringstream ss{v_str};
+    for (std::string token; std::getline(ss, token, ',');)
     {
-        // Remove square brackets at the ends if present
-        std::string v_str = v;
-        if (!v_str.empty() && v_str.front() == '[')
-            v_str.erase(0, 1);
-        if (!v_str.empty() && v_str.back() == ']')
-            v_str.pop_back();
-        v = v_str.c_str();
-        // Parse the range string into vector of pairs
-        std::istringstream ss(v);
-        for (std::string token; std::getline(ss, token, ',');)
+        size_t dash_pos = token.find('-');
+        try
         {
-            size_t dash_pos = token.find('-');
-            try
+            if (dash_pos == std::string::npos)
             {
-                if (dash_pos == std::string::npos)
-                {
-                    // single number
-                    uint64_t num = std::stoull(token);
-                    tool_data->kernel_filter_ranges.emplace_back(num, num);
-                }
-                else
-                {
-                    // range of numbers
-                    uint64_t start = std::stoull(token.substr(0, dash_pos));
-                    uint64_t end   = std::stoull(token.substr(dash_pos + 1));
-                    tool_data->kernel_filter_ranges.emplace_back(start, end);
-                }
+                // single number
+                uint64_t num = std::stoull(token);
+                tool_data->kernel_filter_ranges.emplace_back(num, num);
             }
-            catch (const std::invalid_argument&)
+            else
             {
-                std::cerr << "[rocprofiler-compute] [" << __FUNCTION__
-                          << "] ERROR: Invalid entry in ROCPROF_KERNEL_FILTER_RANGE: " << token
-                          << std::endl;
+                // range of numbers
+                uint64_t start = std::stoull(token.substr(0, dash_pos));
+                uint64_t end   = std::stoull(token.substr(dash_pos + 1));
+                tool_data->kernel_filter_ranges.emplace_back(start, end);
             }
+        }
+        catch (const std::invalid_argument&)
+        {
+            std::cerr << "[rocprofiler-compute] [" << __FUNCTION__
+                      << "] ERROR: Invalid entry in ROCPROF_KERNEL_FILTER_RANGE: " << token
+                      << std::endl;
         }
     }
 
@@ -249,12 +286,19 @@ rocprofiler_tool_configure_result_t* rocprofiler_configure(uint32_t             
 
     // create configure data
     if (!g_cfg)
-        g_cfg = std::make_shared<rocprofiler_tool_configure_result_t>(
+    {
+        auto* tool_data_ptr = new std::unique_ptr<tool_data_t>(std::move(tool_data));
+        g_cfg               = std::make_shared<rocprofiler_tool_configure_result_t>(
             rocprofiler_tool_configure_result_t{sizeof(rocprofiler_tool_configure_result_t),
                                                 &tool_init,
                                                 &tool_fini,
-                                                static_cast<void*>(new std::unique_ptr<tool_data_t>(
-                                                    std::move(tool_data)))});
+                                                static_cast<void*>(tool_data_ptr)});
+
+        // Defer HSA-touching counter setup until HSA actually loads in the
+        // process. See on_hsa_runtime_loaded for rationale.
+        g_sdk_wrapper->at_intercept_table_registration_hsa(&rocprofiler_compute_tool::on_hsa_runtime_loaded,
+                                                           static_cast<void*>(tool_data_ptr));
+    }
 
     return g_cfg.get();
 }

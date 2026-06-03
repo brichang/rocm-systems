@@ -20,6 +20,7 @@ import utils.utils_analysis as utils_analysis
 import utils.utils_common as utils_common
 import utils.utils_profile as utils_profile
 from utils.amdsmi_interface import _per_device_query
+from utils.mi_gpu_spec import mi_gpu_specs
 from utils.tty import (
     format_duration,
     format_node_stats,
@@ -952,17 +953,24 @@ def test_run_prof_success_v3(tmp_path, monkeypatch):
     fname = tmp_path / "pmc_perf_test.yaml"
     fname.write_text("jobs:\n  - pmc:\n    - SQ_WAVES\n")
     workload_dir = str(tmp_path / "workload")
-    os.makedirs(workload_dir + "/out/pmc_1", exist_ok=True)
+    pmc_1_subdir = Path(workload_dir) / "out" / "pmc_1" / "0"
+    pmc_1_subdir.mkdir(parents=True, exist_ok=True)
 
-    csv_content = (
-        "Agent_Type,Node_Id,Wave_Front_Size,Correlation_Id,Dispatch_Id,Agent_Id,Queue_Id,Process_Id,Thread_Id,"
+    # counter_collection.csv and agent_info.csv are required by
+    # process_rocprofv3_output; the converted.csv is produced by
+    # v3_counter_csv_to_v2_csv which we stub to keep the test self-contained.
+    counter_file = pmc_1_subdir / "run_counter_collection.csv"
+    agent_info_file = pmc_1_subdir / "run_agent_info.csv"
+    converted_file = pmc_1_subdir / "run_converted.csv"
+
+    counter_file.write_text(
+        "Correlation_Id,Dispatch_Id,Agent_Id,Queue_Id,Process_Id,Thread_Id,"
         "Grid_Size,Kernel_Id,Kernel_Name,Workgroup_Size,LDS_Block_Size,"
         "Scratch_Size,VGPR_Count,Accum_VGPR_Count,SGPR_Count,Start_Timestamp,"
         "End_Timestamp,Counter_Name,Counter_Value\n"
-        "GPU,0,0,0,0,0,0,0,0,0,0,test_kernel,0,0,0,0,0,0,0,1,SQ_WAVES,100"
+        "0,0,0,0,0,0,0,0,test_kernel,0,0,0,0,0,0,0,1,SQ_WAVES,100\n"
     )
-    with open(workload_dir + "/out/pmc_1/results_0.csv", "w") as f:
-        f.write(csv_content)
+    agent_info_file.write_text("Agent_Type,Node_Id,Wave_Front_Size\nGPU,0,64\n")
 
     monkeypatch.setattr("utils.utils_common._rocprof_cmd", "rocprofv3")
     monkeypatch.setattr(
@@ -971,8 +979,13 @@ def test_run_prof_success_v3(tmp_path, monkeypatch):
     )
     monkeypatch.setattr("utils.utils_profile.console_debug", lambda *a, **k: None)
     monkeypatch.setattr("utils.utils_profile.console_log", lambda *a, **k: None)
+    # Stub the conversion so the test doesn't depend on csv_ops pivot logic,
+    # but process_rocprofv3_output itself runs and exercises Path.glob.
     monkeypatch.setattr(
-        "glob.glob", lambda pattern: [workload_dir + "/out/pmc_1/results_0.csv"]
+        "utils.utils_profile.v3_counter_csv_to_v2_csv",
+        lambda *a, **k: converted_file.write_text(
+            "GPU_ID,Kernel_Name,SQ_WAVES\n0,test_kernel,100\n"
+        ),
     )
 
     utils_profile.run_prof(str(fname), ["--arg"], workload_dir, logging.INFO, "csv")
@@ -1314,7 +1327,6 @@ def test_run_prof_no_results_files(tmp_path, monkeypatch):
         "utils.utils_profile.capture_subprocess_output",
         lambda *a, **k: (True, "success"),
     )
-    monkeypatch.setattr("glob.glob", lambda pattern: [])  # No files found
     monkeypatch.setattr("utils.utils_profile.console_debug", lambda *a, **k: None)
     monkeypatch.setattr("utils.utils_profile.console_log", lambda *a, **k: None)
 
@@ -1432,9 +1444,6 @@ def test_run_prof_tcc_flattening_mi300(tmp_path, monkeypatch):
         lambda *a, **k: (True, "success"),
     )
     monkeypatch.setattr("utils.mi_gpu_spec.mi_gpu_specs.get_num_xcds", lambda *a: 2)
-    monkeypatch.setattr(
-        "glob.glob", lambda pattern: [workload_dir + "/results_test.csv"]
-    )
     monkeypatch.setattr("utils.utils_profile.console_debug", lambda *a, **k: None)
     monkeypatch.setattr("utils.utils_profile.console_log", lambda *a, **k: None)
 
@@ -1757,15 +1766,6 @@ def test_process_rocprofv3_output_csv_format_with_counter_files(tmp_path, monkey
 
     counter_file.write_text("counter,data\ntest,value")
     agent_file.write_text("agent,data\ntest,value")
-
-    def mock_glob(pattern):
-        if "_counter_collection.csv" in pattern:
-            return [str(counter_file)]
-        elif "_converted.csv" in pattern:
-            return [str(converted_file)]
-        return []
-
-    monkeypatch.setattr("glob.glob", mock_glob)
 
     def mock_v3_counter_csv_to_v2_csv(counter_path, agent_path, output_path):
         Path(output_path).write_text("converted,data\ntest,value")
@@ -4281,12 +4281,13 @@ def test_pc_sampling_prof_multiarg_appcmd(
 
 
 def test_set_parser():
-    from utils.utils_common import parse_sets_yaml
-
-    result = parse_sets_yaml("gfx90a")
-
+    result = utils_common.parse_sets_yaml("gfx90a")
     assert "compute_thruput_util" in result
     assert result["compute_thruput_util"]["title"] == "Compute Throughput Utilization"
+
+    shared = utils_common.parse_sets_yaml("gfx1152")
+    assert "compute_thruput_flops" in shared
+    assert shared["launch_stats"]["title"] == "Launch Stats"
 
 
 @pytest.mark.sci_notion
@@ -4369,11 +4370,7 @@ def test_list_metrics(binary_handler_analyze_rocprof_compute, capsys):
 
 def list_blocks_supported_archs() -> list[str]:
     """Return sorted arch names from analysis_configs/gfx* directories."""
-    return sorted(
-        p.name
-        for p in ANALYSIS_CONFIGS.iterdir()
-        if p.is_dir() and p.name.startswith("gfx")
-    )
+    return list(mi_gpu_specs.get_gpu_series_dict().keys())
 
 
 def arch_panels_from_disk(arch: str) -> dict[str, str]:
@@ -4428,7 +4425,9 @@ def test_list_blocks_all_archs(binary_handler_analyze_rocprof_compute, capsys, a
         name = line[name_col:].strip()
         block_entries[block_id] = (alias, name)
 
-    expected_panels = arch_panels_from_disk(arch)
+    expected_panels = arch_panels_from_disk(
+        utils_common.canonical_config_arch(arch) or arch
+    )
     assert set(block_entries) == set(expected_panels), (
         f"--list-blocks {arch}: rows {sorted(block_entries)} != "
         f"on-disk panels {sorted(expected_panels)}"
