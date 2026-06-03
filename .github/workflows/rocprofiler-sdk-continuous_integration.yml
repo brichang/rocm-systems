@@ -403,25 +403,17 @@ jobs:
         timeout-minutes: 10
         shell: bash
         run: |
-          # Prefer an MPI already provided by the container image/runner so that
-          # find_package(MPI) picks up the intended mpirun. Only install when one
-          # is not already present.
           if command -v mpirun >/dev/null 2>&1; then
             echo "Using pre-installed MPI: $(command -v mpirun)"
             exit 0
           fi
 
-          # No MPI found: install via the platform package manager (this job runs
-          # on RPM/SUSE-based images).
           if command -v dnf >/dev/null 2>&1; then
             dnf install -y openmpi openmpi-devel
           elif command -v zypper >/dev/null 2>&1; then
             zypper --non-interactive install openmpi4 openmpi4-devel
           fi
 
-          # RHEL/SUSE install OpenMPI outside the default PATH (and the exact
-          # location differs per distro/version). Discover the installed location
-          # dynamically rather than hard-coding distro-specific paths.
           if ! command -v mpirun >/dev/null 2>&1; then
             mpirun_path=$(find /usr -type f -name mpirun 2>/dev/null | head -n1)
             if [ -n "${mpirun_path}" ]; then
