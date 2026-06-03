@@ -22,6 +22,8 @@ For using profiling options for PC sampling the configuration needed are:
 * ``--pc-sampling-method``: Should be either ``stochastic`` or ``host_trap``, (DEFAULT: stochastic)
 * ``--pc-sampling-interval``: For stochastic sampling, the interval is in cycles. The finest granularity is 1 cycle. For ``host_trap`` sampling, the interval is in microsecond (DEFAULT: 1048576). The interval should be the power of 2. You are recommended try starting from 1048576, and lowering until reaching 65536.
 
+For both ``stochastic`` and ``host_trap`` methods, a profile run collects PC sampling records and writes them to a single ``ps_file_results.json`` in the workload directory.
+
 **Sample command:**
 
 .. code-block:: shell
@@ -65,6 +67,11 @@ Selecting single kernel sorting by PC count:
 .. image:: ../data/pc_sampling/pc_sampling_sort_by_count.png
    :align: left
    :alt: Host trap PC sampling sorting snapshot
+
+Instruction and source attribution
+-----------------------------------
+
+During analysis, each sampled PC is mapped to its containing ISA instruction and resolved back to the originating ``source_file:line``. In addition, for each attributed instruction the analysis lists the prior instructions it waits on, derived from the ``s_waitcnt``-family instructions. This lets you see which preceding instructions a sampled instruction depends on when reasoning about stalls.
 
 .. note::
 
