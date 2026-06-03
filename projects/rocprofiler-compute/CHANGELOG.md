@@ -10,9 +10,7 @@ Full documentation for ROCm Compute Profiler is available at [https://rocm.docs.
 
 * Added backward compatibility for live attach mode to work with older ROCm 7.x.x releases.
 
-* Added source-line and ISA attribution for PC sampling analysis from the native collection tool's code-object disassembly.
-  * `rocprof-compute analyze` maps each sampled offset to its containing ISA instruction and resolves the originating source file and line from the native tool's `*_code_obj_info.json`, falling back to rocprofiler-sdk instruction and comment strings when that file is absent.
-  * PC sampling collection snapshots the referenced source files into a `code_obj_sources/` directory in the workload output so source-line attribution stays valid when the capture is analyzed on another host.
+* PC sampling analysis now reports the ISA instruction and the originating source file and line for each sampled program counter. Source-line attribution stays valid when a captured workload is analyzed on a different host.
 
 ### Changed
 
@@ -33,7 +31,7 @@ Full documentation for ROCm Compute Profiler is available at [https://rocm.docs.
 
 * Reworded the N/A metric-evaluation warning to "divide-by-zero or empty counter data" (the prior "missing counter data" message could only fire for non-missing causes).
 
-* PC sampling collection now routes through the native counter-collection tool by default on ROCm >= 7.x (previously the native tool was disabled for PC-sampling-only runs). Opt out with `--no-native-tool` to retain the prior rocprofiler-sdk-only path.
+* PC sampling collection now uses the native collection tool by default on ROCm >= 7.x. Opt out with `--no-native-tool` to use the prior rocprofiler-sdk path.
 
 ### Removed
 
@@ -59,7 +57,7 @@ Full documentation for ROCm Compute Profiler is available at [https://rocm.docs.
 
 * Fixed empirical roofline benchmark to correctly produce double the Matrix BF16 Gflop/s on gfx90a (MI 200 series) GPUs
 
-* Stale rocprofiler-sdk output is now removed before a PC sampling-only run (`--block 21` or `--block pc_sampling`), so re-profiling into an existing workload directory no longer mixes in results from a previous run
+* Re-profiling PC sampling into an existing workload directory (`--block 21` or `--block pc_sampling`) no longer mixes in results from a previous run.
 
 * PC sampling collection now runs when requested via the `pc_sampling` block alias (`--block pc_sampling`), instead of being silently skipped
 
