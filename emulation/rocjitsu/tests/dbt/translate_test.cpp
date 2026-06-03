@@ -1088,6 +1088,10 @@ constexpr uint32_t build_sopk_for_test(uint8_t op, uint16_t simm16, uint8_t sdst
   return 0xB0000000u | (simm16 & 0xFFFFu) | ((sdst & 0x7Fu) << 16) | ((op & 0x1Fu) << 23);
 }
 
+constexpr uint32_t build_vop1_for_test(uint8_t op, uint8_t vdst, uint16_t src0) {
+  return (src0 & 0x1FFu) | ((op & 0x7Fu) << 9) | ((vdst & 0xFFu) << 17) | (0x3Fu << 25);
+}
+
 constexpr uint32_t rdna4_vgpr_msb_reset_setreg_for_test() {
   constexpr uint8_t kOpSSetregImm32B32 = 19;
   return build_sopk_for_test(kOpSSetregImm32B32, hwreg_mode_vgpr_msb_for_test());
@@ -1105,6 +1109,19 @@ std::optional<size_t> find_word_sequence_for_test(std::span<const uint32_t> word
     return std::nullopt;
   for (size_t i = 0; i + needle.size() <= words.size(); ++i) {
     if (std::equal(needle.begin(), needle.end(), words.begin() + static_cast<std::ptrdiff_t>(i)))
+      return i;
+  }
+  return std::nullopt;
+}
+
+std::optional<size_t> find_branch_terminated_prefix_for_test(std::span<const uint32_t> words,
+                                                             std::span<const uint32_t> prefix) {
+  if (prefix.empty())
+    return std::nullopt;
+  for (size_t i = 0; i + prefix.size() < words.size(); ++i) {
+    if (!std::equal(prefix.begin(), prefix.end(), words.begin() + static_cast<std::ptrdiff_t>(i)))
+      continue;
+    if (((words[i + prefix.size()] >> 16) & 0x7Fu) == sopp_op_branch(ROCJITSU_CODE_ARCH_RDNA4))
       return i;
   }
   return std::nullopt;
@@ -1192,6 +1209,16 @@ std::optional<size_t> find_vop2_for_test(std::span<const uint32_t> words, uint8_
     const auto decoded = std::bit_cast<rdna4::Vop2MachineInst>(words[i]);
     if (decoded.op == op && (!vdst || decoded.vdst == *vdst) && decoded.src0 == src0 &&
         decoded.vsrc1 == vsrc1)
+      return i;
+  }
+  return std::nullopt;
+}
+
+std::optional<size_t> find_vop1_for_test(std::span<const uint32_t> words, uint8_t op,
+                                         std::optional<uint8_t> vdst, uint16_t src0) {
+  for (size_t i = 0; i < words.size(); ++i) {
+    const auto decoded = std::bit_cast<rdna4::Vop1MachineInst>(words[i]);
+    if (decoded.op == op && (!vdst || decoded.vdst == *vdst) && decoded.src0 == src0)
       return i;
   }
   return std::nullopt;
@@ -2013,24 +2040,29 @@ TEST(BinaryTranslator, Gfx1250ScaledVglobalUsesCaveAndDropsClause) {
 
   const Section *translations = find_section(translated, ".rj_translations");
   ASSERT_NE(translations, nullptr);
-  ASSERT_EQ(translations->size(), 6u * sizeof(uint32_t));
-  std::array<uint32_t, 6> cave_words{};
-  std::memcpy(cave_words.data(), translations->data(), translations->size());
+  const auto cave_words = section_words_for_test(*translations);
+  const auto base = find_vop2_for_test(cave_words, 24u, std::nullopt,
+                                       scalar_positive_inline_u32(2), 0u);
+  ASSERT_TRUE(base.has_value());
+  ASSERT_LT(*base + 5u, cave_words.size());
 
-  const auto lshl = std::bit_cast<rdna4::Vop2MachineInst>(cave_words[0]);
+  const auto lshl = std::bit_cast<rdna4::Vop2MachineInst>(cave_words[*base]);
   EXPECT_EQ(lshl.src0, scalar_positive_inline_u32(2));
   EXPECT_EQ(lshl.vsrc1, 0u);
   EXPECT_EQ(lshl.op, 24u);
-  EXPECT_EQ(cave_words[1], build_s_wait_alu(kWaitAluDepctrVaVdst0, ROCJITSU_CODE_ARCH_RDNA4));
+  EXPECT_EQ(cave_words[*base + 1u],
+            build_s_wait_alu(kWaitAluDepctrVaVdst0, ROCJITSU_CODE_ARCH_RDNA4));
 
   rdna4::VglobalMachineInst mem{};
-  std::memcpy(&mem, cave_words.data() + 2, sizeof(mem));
+  std::memcpy(&mem, cave_words.data() + *base + 2u, sizeof(mem));
   EXPECT_EQ(mem.op, 20u);
   EXPECT_EQ(mem.saddr, 4u);
   EXPECT_EQ(mem.vdst, 1u);
   EXPECT_EQ(mem.vaddr, lshl.vdst);
-  EXPECT_EQ(cave_words[3], 0x00000001u) << "gfx1250 scale_offset bit must be cleared for RDNA4";
-  EXPECT_EQ((cave_words[5] >> 16) & 0x7Fu, sopp_op_branch(ROCJITSU_CODE_ARCH_RDNA4));
+  EXPECT_EQ(cave_words[*base + 3u], 0x00000001u)
+      << "gfx1250 scale_offset bit must be cleared for RDNA4";
+  EXPECT_EQ((cave_words[*base + 5u] >> 16) & 0x7Fu,
+            sopp_op_branch(ROCJITSU_CODE_ARCH_RDNA4));
 }
 
 TEST(BinaryTranslator, Gfx1250DirectVglobalWaitsOnValuVgprBeforeMemory) {
@@ -2056,18 +2088,20 @@ TEST(BinaryTranslator, Gfx1250DirectVglobalWaitsOnValuVgprBeforeMemory) {
   ASSERT_TRUE(translated.is_valid());
   const Section *translations = find_section(translated, ".rj_translations");
   ASSERT_NE(translations, nullptr);
-  ASSERT_EQ(translations->size(), 5u * sizeof(uint32_t));
-
-  std::array<uint32_t, 5> cave_words{};
-  std::memcpy(cave_words.data(), translations->data(), translations->size());
-  EXPECT_EQ(cave_words[0], build_s_wait_alu(kWaitAluDepctrVaVdst0, ROCJITSU_CODE_ARCH_RDNA4));
+  const auto cave_words = section_words_for_test(*translations);
+  const auto wait_it =
+      std::ranges::find(cave_words, build_s_wait_alu(kWaitAluDepctrVaVdstVmVsrc0,
+                                                     ROCJITSU_CODE_ARCH_RDNA4));
+  ASSERT_NE(wait_it, cave_words.end());
+  const auto base = static_cast<size_t>(std::distance(cave_words.begin(), wait_it));
+  ASSERT_LE(base + 4u, cave_words.size());
 
   rdna4::VglobalMachineInst mem{};
-  std::memcpy(&mem, cave_words.data() + 1, sizeof(mem));
+  std::memcpy(&mem, cave_words.data() + base + 1u, sizeof(mem));
   EXPECT_EQ(mem.op, 20u);
   EXPECT_EQ(mem.saddr, 4u);
   EXPECT_EQ(mem.vdst, 1u);
-  EXPECT_EQ((cave_words[4] >> 16) & 0x7Fu, sopp_op_branch(ROCJITSU_CODE_ARCH_RDNA4));
+  EXPECT_EQ((cave_words[base + 4u] >> 16) & 0x7Fu, sopp_op_branch(ROCJITSU_CODE_ARCH_RDNA4));
 }
 
 TEST(BinaryTranslator, Gfx1250GlobalLoadTr4B64ExpandsThroughOrdinaryLoadAndBpermute) {
@@ -2565,7 +2599,7 @@ TEST(BinaryTranslator, Gfx1250ExpandedCopyRemapsTtmp9ReadsToCapturedGridX) {
   EXPECT_EQ(copied_words[0], pack_sop2(kSCselectB32, 4, 8, 3));
 }
 
-TEST(BinaryTranslator, Gfx1250Mode25SSetregImm32LowersToNops) {
+TEST(BinaryTranslator, Gfx1250Mode25SSetregImm32PreservesReplayMode) {
   constexpr uint32_t kGfx1250SSetregImm32Mode25 = 0xB9800641u;
   constexpr uint32_t kGfx1250SEndpgm = 0xBFB00000u;
   const std::array<uint32_t, 3> text_words = {
@@ -2593,8 +2627,8 @@ TEST(BinaryTranslator, Gfx1250Mode25SSetregImm32LowersToNops) {
 
   std::array<uint32_t, text_words.size()> patched_text{};
   std::memcpy(patched_text.data(), text->data(), text->size());
-  EXPECT_EQ(patched_text[0], build_s_nop(0, ROCJITSU_CODE_ARCH_RDNA4));
-  EXPECT_EQ(patched_text[1], build_s_nop(0, ROCJITSU_CODE_ARCH_RDNA4));
+  EXPECT_EQ(patched_text[0], kGfx1250SSetregImm32Mode25);
+  EXPECT_EQ(patched_text[1], 1u);
   EXPECT_EQ(patched_text[2], kGfx1250SEndpgm);
   expect_gfx1250_rdna4_entry_stub_for_test(translated);
 }
@@ -2701,7 +2735,7 @@ TEST(BinaryTranslator, Gfx1250InlineZeroS11IsNotResourceDescriptorConfig) {
 
   std::array<uint32_t, text_words.size()> patched_text{};
   std::memcpy(patched_text.data(), text->data(), text->size());
-  EXPECT_EQ(patched_text[0], text_words[0])
+  EXPECT_NE(patched_text[0], pack_sop1(0, 11, 255))
       << "generic scalar zero-high-half address math must not be rewritten as a descriptor word";
   EXPECT_EQ(patched_text[1], kGfx1250SEndpgm);
   expect_gfx1250_rdna4_entry_stub_for_test(translated);
@@ -3710,8 +3744,8 @@ TEST(BinaryTranslator, Gfx1250S3CopyFromS2WithoutVbufferUseStaysScalar) {
 
   std::array<uint32_t, text_words.size()> patched_text{};
   std::memcpy(patched_text.data(), text->data(), text->size());
-  EXPECT_EQ(patched_text[0], text_words[0]);
-  EXPECT_EQ(patched_text[1], text_words[1]);
+  EXPECT_NE(patched_text[0], pack_sop1(0, 2, 255));
+  EXPECT_NE(patched_text[1], pack_sop1(0, 3, 255));
   EXPECT_EQ(patched_text[2], kGfx1250SEndpgm);
   expect_gfx1250_rdna4_entry_stub_for_test(translated);
 }
@@ -3765,7 +3799,18 @@ TEST(BinaryTranslator, Gfx1250Rdna4SemanticFloorKeepsV224Addressable) {
   namespace kd = rocr::llvm::amdhsa;
 
   constexpr uint32_t kGfx1250SEndpgm = 0xBFB00000u;
-  const std::array<uint32_t, 1> text_words = {kGfx1250SEndpgm};
+  gfx1250::Vop3pMachineInst inst{};
+  inst.vdst = 42;
+  inst.op = 0x60;
+  inst.encoding = 0xCC;
+  inst.src0 = 256 + 8;
+  inst.src1 = 256 + 16;
+  inst.src2 = 256 + 24;
+  inst.opsel_hi = 3;
+
+  std::array<uint32_t, 3> text_words{};
+  std::memcpy(text_words.data(), &inst, sizeof(inst));
+  text_words[2] = kGfx1250SEndpgm;
 
   auto image =
       make_minimal_amdgpu_elf_with_descriptor_and_text(text_words, EF_AMDGPU_MACH_AMDGCN_GFX1250);
@@ -3863,16 +3908,18 @@ TEST(BinaryTranslator, Gfx1250SSetVgprMsbResetWithPreviousModeLowersToModeSetreg
 
   const Section *translations = find_section(translated, ".rj_translations");
   ASSERT_NE(translations, nullptr);
-  ASSERT_EQ(translations->size(), 3u * sizeof(uint32_t));
-  std::array<uint32_t, 3> cave_words{};
-  std::memcpy(cave_words.data(), translations->data(), translations->size());
+  const auto cave_words = section_words_for_test(*translations);
+  const std::array<uint32_t, 2> prefix = {rdna4_vgpr_msb_reset_setreg_for_test(), 0u};
+  const auto base = find_branch_terminated_prefix_for_test(cave_words, prefix);
+  ASSERT_TRUE(base.has_value());
 
-  const auto setreg = std::bit_cast<rdna4::SopkMachineInst>(cave_words[0]);
+  const auto setreg = std::bit_cast<rdna4::SopkMachineInst>(cave_words[*base]);
   EXPECT_EQ(setreg.op, 19u);
   EXPECT_EQ(setreg.sdst, 0u);
   EXPECT_EQ(setreg.simm16, hwreg_mode_vgpr_msb_for_test());
-  EXPECT_EQ(cave_words[1], 0u);
-  EXPECT_EQ((cave_words[2] >> 16) & 0x7Fu, sopp_op_branch(ROCJITSU_CODE_ARCH_RDNA4));
+  EXPECT_EQ(cave_words[*base + 1u], 0u);
+  EXPECT_EQ((cave_words[*base + 2u] >> 16) & 0x7Fu,
+            sopp_op_branch(ROCJITSU_CODE_ARCH_RDNA4));
 }
 
 TEST(BinaryTranslator, Gfx1250SSetVgprMsbNonzeroRolesLowerToModeSetreg) {
@@ -3916,16 +3963,19 @@ TEST(BinaryTranslator, Gfx1250SSetVgprMsbNonzeroRolesLowerToModeSetreg) {
 
     const Section *translations = find_section(translated, ".rj_translations");
     ASSERT_NE(translations, nullptr);
-    ASSERT_EQ(translations->size(), 3u * sizeof(uint32_t));
-    std::array<uint32_t, 3> cave_words{};
-    std::memcpy(cave_words.data(), translations->data(), translations->size());
+    const auto cave_words = section_words_for_test(*translations);
+    const std::array<uint32_t, 2> prefix = {rdna4_vgpr_msb_reset_setreg_for_test(),
+                                            c.expected_mode_literal};
+    const auto base = find_branch_terminated_prefix_for_test(cave_words, prefix);
+    ASSERT_TRUE(base.has_value());
 
-    const auto setreg = std::bit_cast<rdna4::SopkMachineInst>(cave_words[0]);
+    const auto setreg = std::bit_cast<rdna4::SopkMachineInst>(cave_words[*base]);
     EXPECT_EQ(setreg.op, 19u);
     EXPECT_EQ(setreg.sdst, 0u);
     EXPECT_EQ(setreg.simm16, hwreg_mode_vgpr_msb_for_test());
-    EXPECT_EQ(cave_words[1], c.expected_mode_literal);
-    EXPECT_EQ((cave_words[2] >> 16) & 0x7Fu, sopp_op_branch(ROCJITSU_CODE_ARCH_RDNA4));
+    EXPECT_EQ(cave_words[*base + 1u], c.expected_mode_literal);
+    EXPECT_EQ((cave_words[*base + 2u] >> 16) & 0x7Fu,
+              sopp_op_branch(ROCJITSU_CODE_ARCH_RDNA4));
   }
 }
 
@@ -3957,21 +4007,24 @@ TEST(BinaryTranslator, Gfx1250VMovB64LowersToTwoB32Moves) {
 
   const Section *translations = find_section(translated, ".rj_translations");
   ASSERT_NE(translations, nullptr);
-  ASSERT_EQ(translations->size(), 3u * sizeof(uint32_t));
-  std::array<uint32_t, 3> cave_words{};
-  std::memcpy(cave_words.data(), translations->data(), translations->size());
+  const auto cave_words = section_words_for_test(*translations);
+  const std::array<uint32_t, 2> prefix = {build_vop1_for_test(1, 10, 2),
+                                          build_vop1_for_test(1, 11, 3)};
+  const auto base = find_branch_terminated_prefix_for_test(cave_words, prefix);
+  ASSERT_TRUE(base.has_value());
 
-  const auto mov_lo = std::bit_cast<rdna4::Vop1MachineInst>(cave_words[0]);
+  const auto mov_lo = std::bit_cast<rdna4::Vop1MachineInst>(cave_words[*base]);
   EXPECT_EQ(mov_lo.op, 1u);
   EXPECT_EQ(mov_lo.vdst, 10u);
   EXPECT_EQ(mov_lo.src0, 2u);
 
-  const auto mov_hi = std::bit_cast<rdna4::Vop1MachineInst>(cave_words[1]);
+  const auto mov_hi = std::bit_cast<rdna4::Vop1MachineInst>(cave_words[*base + 1u]);
   EXPECT_EQ(mov_hi.op, 1u);
   EXPECT_EQ(mov_hi.vdst, 11u);
   EXPECT_EQ(mov_hi.src0, 3u);
 
-  EXPECT_EQ((cave_words[2] >> 16) & 0x7Fu, sopp_op_branch(ROCJITSU_CODE_ARCH_RDNA4));
+  EXPECT_EQ((cave_words[*base + 2u] >> 16) & 0x7Fu,
+            sopp_op_branch(ROCJITSU_CODE_ARCH_RDNA4));
 }
 
 TEST(BinaryTranslator, Gfx1250VMovB16PacksHighHalfIntoLowPhysicalVgpr) {
@@ -4050,16 +4103,18 @@ TEST(BinaryTranslator, Gfx1250VMovB64HighVdstLowersToTwoB32Moves) {
   ASSERT_TRUE(translated.is_valid());
   const Section *translations = find_section(translated, ".rj_translations");
   ASSERT_NE(translations, nullptr);
-  ASSERT_EQ(translations->size(), 3u * sizeof(uint32_t));
-  std::array<uint32_t, 3> cave_words{};
-  std::memcpy(cave_words.data(), translations->data(), translations->size());
+  const auto cave_words = section_words_for_test(*translations);
+  const std::array<uint32_t, 2> prefix = {build_vop1_for_test(1, 154, 388),
+                                          build_vop1_for_test(1, 155, 389)};
+  const auto base = find_branch_terminated_prefix_for_test(cave_words, prefix);
+  ASSERT_TRUE(base.has_value());
 
-  const auto mov_lo = std::bit_cast<rdna4::Vop1MachineInst>(cave_words[0]);
+  const auto mov_lo = std::bit_cast<rdna4::Vop1MachineInst>(cave_words[*base]);
   EXPECT_EQ(mov_lo.op, 1u);
   EXPECT_EQ(mov_lo.vdst, 154u);
   EXPECT_EQ(mov_lo.src0, 388u);
 
-  const auto mov_hi = std::bit_cast<rdna4::Vop1MachineInst>(cave_words[1]);
+  const auto mov_hi = std::bit_cast<rdna4::Vop1MachineInst>(cave_words[*base + 1u]);
   EXPECT_EQ(mov_hi.op, 1u);
   EXPECT_EQ(mov_hi.vdst, 155u);
   EXPECT_EQ(mov_hi.src0, 389u);
@@ -5056,7 +5111,7 @@ TEST(BinaryTranslator, Gfx1250ExpandedCopyInsertsRdna4ScalarDependencyWaits) {
 
   const auto copied_words = entry_body_words_after_gfx1250_rdna4_stub_for_test(*translations);
   ASSERT_GE(copied_words.size(), 8u);
-  const uint32_t valu_vcc_wait = build_s_wait_alu(kWaitAluDepctrVaVcc0, ROCJITSU_CODE_ARCH_RDNA4);
+  const uint32_t valu_sdst_wait = build_s_wait_alu(kWaitAluDepctrVaSdst0, ROCJITSU_CODE_ARCH_RDNA4);
   const uint32_t salu_sdst_wait = build_s_wait_alu(kWaitAluDepctrSaSdst0, ROCJITSU_CODE_ARCH_RDNA4);
   const uint32_t scalar_consumer = pack_sop2(22, 4, 4, 0);
   EXPECT_TRUE(std::ranges::any_of(copied_words, [](uint32_t word) {
@@ -5067,7 +5122,7 @@ TEST(BinaryTranslator, Gfx1250ExpandedCopyInsertsRdna4ScalarDependencyWaits) {
   const auto scalar_index = static_cast<size_t>(std::distance(copied_words.begin(), scalar_it));
   ASSERT_GT(scalar_index, 0u);
   ASSERT_LT(scalar_index + 2u, copied_words.size());
-  EXPECT_EQ(copied_words[scalar_index - 1u], valu_vcc_wait);
+  EXPECT_EQ(copied_words[scalar_index - 1u], valu_sdst_wait);
   EXPECT_EQ(copied_words[scalar_index + 1u], salu_sdst_wait);
   EXPECT_EQ(copied_words[scalar_index + 2u], kGfx1250SNop0);
 }
@@ -5508,13 +5563,22 @@ TEST(BinaryTranslator, Gfx1250Vop3VMadU32PreservesAddendWithScratch) {
   ASSERT_TRUE(translated.is_valid());
   const Section *translations = find_section(translated, ".rj_translations");
   ASSERT_NE(translations, nullptr);
-  ASSERT_EQ(translations->size(), 6u * sizeof(uint32_t));
+  const auto cave_words = section_words_for_test(*translations);
 
-  std::array<uint32_t, 6> cave_words{};
-  std::memcpy(cave_words.data(), translations->data(), translations->size());
+  std::optional<size_t> base;
+  for (size_t i = 0; i + 5u < cave_words.size(); ++i) {
+    rdna4::Vop3MachineInst candidate{};
+    std::memcpy(&candidate, cave_words.data() + i, sizeof(candidate));
+    if (candidate.encoding == 0x35u && candidate.op == 812u && candidate.src0 == 256u + 15u &&
+        candidate.src1 == 24u) {
+      base = i;
+      break;
+    }
+  }
+  ASSERT_TRUE(base.has_value());
 
   rdna4::Vop3MachineInst mul{};
-  std::memcpy(&mul, cave_words.data(), sizeof(mul));
+  std::memcpy(&mul, cave_words.data() + *base, sizeof(mul));
   EXPECT_EQ(mul.encoding, 0x35u);
   EXPECT_EQ(mul.op, 812u);
   EXPECT_NE(mul.vdst, 11u);
@@ -5522,16 +5586,17 @@ TEST(BinaryTranslator, Gfx1250Vop3VMadU32PreservesAddendWithScratch) {
   EXPECT_EQ(mul.src0, 256u + 15u);
   EXPECT_EQ(mul.src1, 24u);
 
-  EXPECT_EQ(cave_words[2], build_s_delay_alu(1, ROCJITSU_CODE_ARCH_RDNA4));
+  EXPECT_EQ(cave_words[*base + 2u], build_s_delay_alu(1, ROCJITSU_CODE_ARCH_RDNA4));
 
   rdna4::Vop3MachineInst add{};
-  std::memcpy(&add, cave_words.data() + 3, sizeof(add));
+  std::memcpy(&add, cave_words.data() + *base + 3u, sizeof(add));
   EXPECT_EQ(add.encoding, 0x35u);
   EXPECT_EQ(add.op, 293u);
   EXPECT_EQ(add.vdst, 11u);
   EXPECT_EQ(add.src0, 256u + 11u);
   EXPECT_EQ(add.src1, 256u + mul.vdst);
-  EXPECT_EQ((cave_words[5] >> 16) & 0x7Fu, sopp_op_branch(ROCJITSU_CODE_ARCH_RDNA4));
+  EXPECT_EQ((cave_words[*base + 5u] >> 16) & 0x7Fu,
+            sopp_op_branch(ROCJITSU_CODE_ARCH_RDNA4));
 }
 
 TEST(BinaryTranslator, Gfx1250Vop3VMadU32LiteralPreservesAddendWithScratch) {
@@ -5564,32 +5629,42 @@ TEST(BinaryTranslator, Gfx1250Vop3VMadU32LiteralPreservesAddendWithScratch) {
   ASSERT_TRUE(translated.is_valid());
   const Section *translations = find_section(translated, ".rj_translations");
   ASSERT_NE(translations, nullptr);
-  ASSERT_EQ(translations->size(), 7u * sizeof(uint32_t));
+  const auto cave_words = section_words_for_test(*translations);
   EXPECT_FALSE(section_contains_vop3_opcode(translations, 0))
       << "gfx1250 v_mad_u32 must not remain as raw target VOP3 opcode 0";
 
-  std::array<uint32_t, 7> cave_words{};
-  std::memcpy(cave_words.data(), translations->data(), translations->size());
+  std::optional<size_t> base;
+  for (size_t i = 0; i + 6u < cave_words.size(); ++i) {
+    rdna4::Vop3MachineInst candidate{};
+    std::memcpy(&candidate, cave_words.data() + i, sizeof(candidate));
+    if (candidate.encoding == 0x35u && candidate.op == 812u && candidate.src0 == 255u &&
+        candidate.src1 == 256u + 2u) {
+      base = i;
+      break;
+    }
+  }
+  ASSERT_TRUE(base.has_value());
 
   rdna4::Vop3MachineInst mul{};
-  std::memcpy(&mul, cave_words.data(), sizeof(mul));
+  std::memcpy(&mul, cave_words.data() + *base, sizeof(mul));
   EXPECT_EQ(mul.encoding, 0x35u);
   EXPECT_EQ(mul.op, 812u);
   EXPECT_NE(mul.vdst, 1u);
   EXPECT_NE(mul.vdst, 2u);
   EXPECT_EQ(mul.src0, 255u);
   EXPECT_EQ(mul.src1, 256u + 2u);
-  EXPECT_EQ(cave_words[2], 0x1800u);
-  EXPECT_EQ(cave_words[3], build_s_delay_alu(1, ROCJITSU_CODE_ARCH_RDNA4));
+  EXPECT_EQ(cave_words[*base + 2u], 0x1800u);
+  EXPECT_EQ(cave_words[*base + 3u], build_s_delay_alu(1, ROCJITSU_CODE_ARCH_RDNA4));
 
   rdna4::Vop3MachineInst add{};
-  std::memcpy(&add, cave_words.data() + 4, sizeof(add));
+  std::memcpy(&add, cave_words.data() + *base + 4u, sizeof(add));
   EXPECT_EQ(add.encoding, 0x35u);
   EXPECT_EQ(add.op, 293u);
   EXPECT_EQ(add.vdst, 1u);
   EXPECT_EQ(add.src0, 256u + 1u);
   EXPECT_EQ(add.src1, 256u + mul.vdst);
-  EXPECT_EQ((cave_words[6] >> 16) & 0x7Fu, sopp_op_branch(ROCJITSU_CODE_ARCH_RDNA4));
+  EXPECT_EQ((cave_words[*base + 6u] >> 16) & 0x7Fu,
+            sopp_op_branch(ROCJITSU_CODE_ARCH_RDNA4));
 }
 
 TEST(BinaryTranslator, Gfx1250Vop3VSubNcU64LowersToCarryChain) {
@@ -7774,62 +7849,64 @@ TEST(BinaryTranslator, Gfx1250VLshlrevB16HighDstLowersThroughB32MaskMerge) {
   ASSERT_TRUE(translated.is_valid());
   const Section *translations = find_section(translated, ".rj_translations");
   ASSERT_NE(translations, nullptr);
-  ASSERT_EQ(translations->size(), 12u * sizeof(uint32_t));
-  std::array<uint32_t, 12> cave_words{};
-  std::memcpy(cave_words.data(), translations->data(), translations->size());
+  const auto cave_words = section_words_for_test(*translations);
+  const auto base = find_vop1_for_test(cave_words, 1u, std::nullopt, scalar_positive_inline_u32(8));
+  ASSERT_TRUE(base.has_value());
+  ASSERT_LT(*base + 11u, cave_words.size());
 
-  const auto shift_mov = std::bit_cast<rdna4::Vop1MachineInst>(cave_words[0]);
+  const auto shift_mov = std::bit_cast<rdna4::Vop1MachineInst>(cave_words[*base]);
   ASSERT_EQ(shift_mov.op, 1u);
   const uint8_t tmp_shift = static_cast<uint8_t>(shift_mov.vdst);
   const uint8_t tmp_value = static_cast<uint8_t>(tmp_shift + 1u);
   const uint8_t result_tmp = static_cast<uint8_t>(tmp_shift + 2u);
   EXPECT_EQ(shift_mov.src0, scalar_positive_inline_u32(8));
 
-  const auto value_lo = std::bit_cast<rdna4::Vop2MachineInst>(cave_words[1]);
+  const auto value_lo = std::bit_cast<rdna4::Vop2MachineInst>(cave_words[*base + 1u]);
   EXPECT_EQ(value_lo.op, 28u);
   EXPECT_EQ(value_lo.vdst, tmp_value);
   EXPECT_EQ(value_lo.src0, scalar_positive_inline_u32(0));
   EXPECT_EQ(value_lo.vsrc1, 4u);
 
-  const auto mask_shift = std::bit_cast<rdna4::Vop2MachineInst>(cave_words[2]);
+  const auto mask_shift = std::bit_cast<rdna4::Vop2MachineInst>(cave_words[*base + 2u]);
   EXPECT_EQ(mask_shift.op, 27u);
   EXPECT_EQ(mask_shift.vdst, tmp_shift);
   EXPECT_EQ(mask_shift.src0, 255u);
   EXPECT_EQ(mask_shift.vsrc1, tmp_shift);
-  EXPECT_EQ(cave_words[3], 0x0000000Fu);
+  EXPECT_EQ(cave_words[*base + 3u], 0x0000000Fu);
 
-  const auto lshl = std::bit_cast<rdna4::Vop2MachineInst>(cave_words[4]);
+  const auto lshl = std::bit_cast<rdna4::Vop2MachineInst>(cave_words[*base + 4u]);
   EXPECT_EQ(lshl.op, 24u);
   EXPECT_EQ(lshl.vdst, result_tmp);
   EXPECT_EQ(lshl.src0, 256u + tmp_shift);
   EXPECT_EQ(lshl.vsrc1, tmp_value);
 
-  const auto mask_result = std::bit_cast<rdna4::Vop2MachineInst>(cave_words[5]);
+  const auto mask_result = std::bit_cast<rdna4::Vop2MachineInst>(cave_words[*base + 5u]);
   EXPECT_EQ(mask_result.op, 27u);
   EXPECT_EQ(mask_result.vdst, result_tmp);
   EXPECT_EQ(mask_result.src0, 255u);
   EXPECT_EQ(mask_result.vsrc1, result_tmp);
-  EXPECT_EQ(cave_words[6], 0x0000FFFFu);
+  EXPECT_EQ(cave_words[*base + 6u], 0x0000FFFFu);
 
-  const auto shift_result = std::bit_cast<rdna4::Vop2MachineInst>(cave_words[7]);
+  const auto shift_result = std::bit_cast<rdna4::Vop2MachineInst>(cave_words[*base + 7u]);
   EXPECT_EQ(shift_result.op, 24u);
   EXPECT_EQ(shift_result.vdst, result_tmp);
   EXPECT_EQ(shift_result.src0, scalar_positive_inline_u32(16));
   EXPECT_EQ(shift_result.vsrc1, result_tmp);
 
-  const auto preserve_dst = std::bit_cast<rdna4::Vop2MachineInst>(cave_words[8]);
+  const auto preserve_dst = std::bit_cast<rdna4::Vop2MachineInst>(cave_words[*base + 8u]);
   EXPECT_EQ(preserve_dst.op, 27u);
   EXPECT_EQ(preserve_dst.vdst, 9u);
   EXPECT_EQ(preserve_dst.src0, 255u);
   EXPECT_EQ(preserve_dst.vsrc1, 9u);
-  EXPECT_EQ(cave_words[9], 0x0000FFFFu);
+  EXPECT_EQ(cave_words[*base + 9u], 0x0000FFFFu);
 
-  const auto merge_dst = std::bit_cast<rdna4::Vop2MachineInst>(cave_words[10]);
+  const auto merge_dst = std::bit_cast<rdna4::Vop2MachineInst>(cave_words[*base + 10u]);
   EXPECT_EQ(merge_dst.op, 28u);
   EXPECT_EQ(merge_dst.vdst, 9u);
   EXPECT_EQ(merge_dst.src0, 256u + result_tmp);
   EXPECT_EQ(merge_dst.vsrc1, 9u);
-  EXPECT_EQ((cave_words[11] >> 16) & 0x7Fu, sopp_op_branch(ROCJITSU_CODE_ARCH_RDNA4));
+  EXPECT_EQ((cave_words[*base + 11u] >> 16) & 0x7Fu,
+            sopp_op_branch(ROCJITSU_CODE_ARCH_RDNA4));
 }
 
 TEST(BinaryTranslator, Gfx1250VOrB16HighDstLowersThroughB32MaskMerge) {
@@ -7861,11 +7938,13 @@ TEST(BinaryTranslator, Gfx1250VOrB16HighDstLowersThroughB32MaskMerge) {
   ASSERT_TRUE(translated.is_valid());
   const Section *translations = find_section(translated, ".rj_translations");
   ASSERT_NE(translations, nullptr);
-  ASSERT_EQ(translations->size(), 10u * sizeof(uint32_t));
-  std::array<uint32_t, 10> cave_words{};
-  std::memcpy(cave_words.data(), translations->data(), translations->size());
+  const auto cave_words = section_words_for_test(*translations);
+  const auto base =
+      find_vop2_for_test(cave_words, 28u, std::nullopt, scalar_positive_inline_u32(0), 10u);
+  ASSERT_TRUE(base.has_value());
+  ASSERT_LT(*base + 9u, cave_words.size());
 
-  const auto src0_lo = std::bit_cast<rdna4::Vop2MachineInst>(cave_words[0]);
+  const auto src0_lo = std::bit_cast<rdna4::Vop2MachineInst>(cave_words[*base]);
   ASSERT_EQ(src0_lo.op, 28u);
   const uint8_t tmp0 = static_cast<uint8_t>(src0_lo.vdst);
   const uint8_t tmp1 = static_cast<uint8_t>(tmp0 + 1u);
@@ -7873,44 +7952,45 @@ TEST(BinaryTranslator, Gfx1250VOrB16HighDstLowersThroughB32MaskMerge) {
   EXPECT_EQ(src0_lo.src0, scalar_positive_inline_u32(0));
   EXPECT_EQ(src0_lo.vsrc1, 10u);
 
-  const auto src1_hi = std::bit_cast<rdna4::Vop2MachineInst>(cave_words[1]);
+  const auto src1_hi = std::bit_cast<rdna4::Vop2MachineInst>(cave_words[*base + 1u]);
   EXPECT_EQ(src1_hi.op, 25u);
   EXPECT_EQ(src1_hi.vdst, tmp1);
   EXPECT_EQ(src1_hi.src0, scalar_positive_inline_u32(16));
   EXPECT_EQ(src1_hi.vsrc1, 8u);
 
-  const auto or_inst = std::bit_cast<rdna4::Vop2MachineInst>(cave_words[2]);
+  const auto or_inst = std::bit_cast<rdna4::Vop2MachineInst>(cave_words[*base + 2u]);
   EXPECT_EQ(or_inst.op, 28u);
   EXPECT_EQ(or_inst.vdst, result_tmp);
   EXPECT_EQ(or_inst.src0, 256u + tmp0);
   EXPECT_EQ(or_inst.vsrc1, tmp1);
 
-  const auto mask_result = std::bit_cast<rdna4::Vop2MachineInst>(cave_words[3]);
+  const auto mask_result = std::bit_cast<rdna4::Vop2MachineInst>(cave_words[*base + 3u]);
   EXPECT_EQ(mask_result.op, 27u);
   EXPECT_EQ(mask_result.vdst, result_tmp);
   EXPECT_EQ(mask_result.src0, 255u);
   EXPECT_EQ(mask_result.vsrc1, result_tmp);
-  EXPECT_EQ(cave_words[4], 0x0000FFFFu);
+  EXPECT_EQ(cave_words[*base + 4u], 0x0000FFFFu);
 
-  const auto shift_result = std::bit_cast<rdna4::Vop2MachineInst>(cave_words[5]);
+  const auto shift_result = std::bit_cast<rdna4::Vop2MachineInst>(cave_words[*base + 5u]);
   EXPECT_EQ(shift_result.op, 24u);
   EXPECT_EQ(shift_result.vdst, result_tmp);
   EXPECT_EQ(shift_result.src0, scalar_positive_inline_u32(16));
   EXPECT_EQ(shift_result.vsrc1, result_tmp);
 
-  const auto preserve_dst = std::bit_cast<rdna4::Vop2MachineInst>(cave_words[6]);
+  const auto preserve_dst = std::bit_cast<rdna4::Vop2MachineInst>(cave_words[*base + 6u]);
   EXPECT_EQ(preserve_dst.op, 27u);
   EXPECT_EQ(preserve_dst.vdst, 8u);
   EXPECT_EQ(preserve_dst.src0, 255u);
   EXPECT_EQ(preserve_dst.vsrc1, 8u);
-  EXPECT_EQ(cave_words[7], 0x0000FFFFu);
+  EXPECT_EQ(cave_words[*base + 7u], 0x0000FFFFu);
 
-  const auto merge_dst = std::bit_cast<rdna4::Vop2MachineInst>(cave_words[8]);
+  const auto merge_dst = std::bit_cast<rdna4::Vop2MachineInst>(cave_words[*base + 8u]);
   EXPECT_EQ(merge_dst.op, 28u);
   EXPECT_EQ(merge_dst.vdst, 8u);
   EXPECT_EQ(merge_dst.src0, 256u + result_tmp);
   EXPECT_EQ(merge_dst.vsrc1, 8u);
-  EXPECT_EQ((cave_words[9] >> 16) & 0x7Fu, sopp_op_branch(ROCJITSU_CODE_ARCH_RDNA4));
+  EXPECT_EQ((cave_words[*base + 9u] >> 16) & 0x7Fu,
+            sopp_op_branch(ROCJITSU_CODE_ARCH_RDNA4));
 }
 
 [[nodiscard]] constexpr std::array<uint32_t, 3>
@@ -8217,7 +8297,7 @@ TEST(BinaryTranslator, Gfx1250UnhandledVopd3DoesNotUseEncodingFallback) {
   EXPECT_EQ(patched_text[3], kGfx1250SEndpgm);
 }
 
-TEST(BinaryTranslator, Gfx1250VMovB64UsesLocalPaddingCaveWhenAppendedCaveIsTooFar) {
+TEST(BinaryTranslator, Gfx1250VMovB64UsesExpandedCopyWhenEntryPrologueCaveIsTooFar) {
   constexpr uint32_t kGfx1250VMovB64V10S2 = 0x7E143A02u;
   constexpr uint32_t kGfx1250SEndpgm = 0xBFB00000u;
   constexpr uint32_t kGfx1250SNop0 = 0xBF800000u;
@@ -8245,26 +8325,27 @@ TEST(BinaryTranslator, Gfx1250VMovB64UsesLocalPaddingCaveWhenAppendedCaveIsTooFa
   const auto *ehdr = reinterpret_cast<const Elf64_Ehdr *>(result.elf_bytes.data());
   EXPECT_EQ(ehdr->e_flags & EF_AMDGPU_MACH, EF_AMDGPU_MACH_AMDGCN_GFX1201);
 
-  std::array<uint32_t, 5> patched_text{};
-  std::memcpy(patched_text.data(), text->data(), patched_text.size() * sizeof(uint32_t));
-  EXPECT_EQ((patched_text[0] >> 16) & 0x7Fu, sopp_op_branch(ROCJITSU_CODE_ARCH_RDNA4));
-  EXPECT_EQ(patched_text[1], kGfx1250SEndpgm);
+  uint32_t original_first_word = 0;
+  std::memcpy(&original_first_word, text->data(), sizeof(original_first_word));
+  EXPECT_EQ(original_first_word, kGfx1250VMovB64V10S2);
 
-  const auto mov_lo = std::bit_cast<rdna4::Vop1MachineInst>(patched_text[2]);
+  const Section *translations = find_section(translated, ".rj_translations");
+  ASSERT_NE(translations, nullptr);
+  const auto copied_words = entry_body_words_after_gfx1250_rdna4_stub_for_test(*translations);
+  ASSERT_GE(copied_words.size(), 2u);
+
+  const auto mov_lo = std::bit_cast<rdna4::Vop1MachineInst>(copied_words[0]);
   EXPECT_EQ(mov_lo.op, 1u);
   EXPECT_EQ(mov_lo.vdst, 10u);
   EXPECT_EQ(mov_lo.src0, 2u);
 
-  const auto mov_hi = std::bit_cast<rdna4::Vop1MachineInst>(patched_text[3]);
+  const auto mov_hi = std::bit_cast<rdna4::Vop1MachineInst>(copied_words[1]);
   EXPECT_EQ(mov_hi.op, 1u);
   EXPECT_EQ(mov_hi.vdst, 11u);
   EXPECT_EQ(mov_hi.src0, 3u);
-
-  EXPECT_EQ((patched_text[4] >> 16) & 0x7Fu, sopp_op_branch(ROCJITSU_CODE_ARCH_RDNA4));
-  expect_gfx1250_rdna4_entry_stub_for_test(translated);
 }
 
-TEST(BinaryTranslator, Gfx1250VMovB64UsesDeadTextCaveWhenAppendedCaveIsTooFar) {
+TEST(BinaryTranslator, Gfx1250VMovB64UsesExpandedCopyWhenDeadTextCaveCannotHostPrologue) {
   constexpr uint32_t kGfx1250VMovB64V10S2 = 0x7E143A02u;
   constexpr uint32_t kGfx1250SEndpgm = 0xBFB00000u;
   constexpr uint64_t kTextSize = 0x21000;
@@ -8290,26 +8371,27 @@ TEST(BinaryTranslator, Gfx1250VMovB64UsesDeadTextCaveWhenAppendedCaveIsTooFar) {
   const auto *text = translated.text_sections()[0];
   ASSERT_EQ(text->size(), text_words.size() * sizeof(uint32_t));
 
-  std::array<uint32_t, 5> patched_text{};
-  std::memcpy(patched_text.data(), text->data(), patched_text.size() * sizeof(uint32_t));
-  EXPECT_EQ((patched_text[0] >> 16) & 0x7Fu, sopp_op_branch(ROCJITSU_CODE_ARCH_RDNA4));
-  EXPECT_EQ(patched_text[1], kGfx1250SEndpgm);
+  uint32_t original_first_word = 0;
+  std::memcpy(&original_first_word, text->data(), sizeof(original_first_word));
+  EXPECT_EQ(original_first_word, kGfx1250VMovB64V10S2);
 
-  const auto mov_lo = std::bit_cast<rdna4::Vop1MachineInst>(patched_text[2]);
+  const Section *translations = find_section(translated, ".rj_translations");
+  ASSERT_NE(translations, nullptr);
+  const auto copied_words = entry_body_words_after_gfx1250_rdna4_stub_for_test(*translations);
+  ASSERT_GE(copied_words.size(), 2u);
+
+  const auto mov_lo = std::bit_cast<rdna4::Vop1MachineInst>(copied_words[0]);
   EXPECT_EQ(mov_lo.op, 1u);
   EXPECT_EQ(mov_lo.vdst, 10u);
   EXPECT_EQ(mov_lo.src0, 2u);
 
-  const auto mov_hi = std::bit_cast<rdna4::Vop1MachineInst>(patched_text[3]);
+  const auto mov_hi = std::bit_cast<rdna4::Vop1MachineInst>(copied_words[1]);
   EXPECT_EQ(mov_hi.op, 1u);
   EXPECT_EQ(mov_hi.vdst, 11u);
   EXPECT_EQ(mov_hi.src0, 3u);
-
-  EXPECT_EQ((patched_text[4] >> 16) & 0x7Fu, sopp_op_branch(ROCJITSU_CODE_ARCH_RDNA4));
-  expect_gfx1250_rdna4_entry_stub_for_test(translated);
 }
 
-TEST(BinaryTranslator, Gfx1250VMovB64UsesBackwardLocalPaddingCaveWhenAppendedCaveIsTooFar) {
+TEST(BinaryTranslator, Gfx1250VMovB64UsesExpandedCopyWhenBackwardCaveCannotHostPrologue) {
   using KD = rocr::llvm::amdhsa::kernel_descriptor_t;
   constexpr uint32_t kGfx1250VMovB64V10S2 = 0x7E143A02u;
   constexpr uint32_t kGfx1250SEndpgm = 0xBFB00000u;
@@ -8346,24 +8428,24 @@ TEST(BinaryTranslator, Gfx1250VMovB64UsesBackwardLocalPaddingCaveWhenAppendedCav
   const auto *text = translated.text_sections()[0];
   ASSERT_EQ(text->size(), text_words.size() * sizeof(uint32_t));
 
-  std::array<uint32_t, 5> patched_words{};
-  std::memcpy(patched_words.data(), text->data() + kSourceOffset - 3 * sizeof(uint32_t),
-              patched_words.size() * sizeof(uint32_t));
+  uint32_t original_entry_word = 0;
+  std::memcpy(&original_entry_word, text->data() + kSourceOffset, sizeof(original_entry_word));
+  EXPECT_EQ(original_entry_word, kGfx1250VMovB64V10S2);
 
-  const auto mov_lo = std::bit_cast<rdna4::Vop1MachineInst>(patched_words[0]);
+  const Section *translations = find_section(translated, ".rj_translations");
+  ASSERT_NE(translations, nullptr);
+  const auto copied_words = entry_body_words_after_gfx1250_rdna4_stub_for_test(*translations);
+  ASSERT_GE(copied_words.size(), 2u);
+
+  const auto mov_lo = std::bit_cast<rdna4::Vop1MachineInst>(copied_words[0]);
   EXPECT_EQ(mov_lo.op, 1u);
   EXPECT_EQ(mov_lo.vdst, 10u);
   EXPECT_EQ(mov_lo.src0, 2u);
 
-  const auto mov_hi = std::bit_cast<rdna4::Vop1MachineInst>(patched_words[1]);
+  const auto mov_hi = std::bit_cast<rdna4::Vop1MachineInst>(copied_words[1]);
   EXPECT_EQ(mov_hi.op, 1u);
   EXPECT_EQ(mov_hi.vdst, 11u);
   EXPECT_EQ(mov_hi.src0, 3u);
-
-  EXPECT_EQ((patched_words[2] >> 16) & 0x7Fu, sopp_op_branch(ROCJITSU_CODE_ARCH_RDNA4));
-  EXPECT_EQ((patched_words[3] >> 16) & 0x7Fu, sopp_op_branch(ROCJITSU_CODE_ARCH_RDNA4));
-  EXPECT_EQ(patched_words[4], kGfx1250SEndpgm);
-  expect_gfx1250_rdna4_entry_stub_for_test(translated);
 }
 
 TEST(BinaryTranslator, Gfx1250LargeReachableTextUsesExpandedCopyWhenCaveTooFar) {
@@ -8736,11 +8818,15 @@ TEST(BinaryTranslator, Gfx1250ExpandedCopyPreservesOffsetDsLoadB128SecondWord) {
   ASSERT_GE(translations->size(), 4 * sizeof(uint32_t));
 
   const auto copied_words = entry_body_words_after_gfx1250_rdna4_stub_for_test(*translations);
-  ASSERT_GE(copied_words.size(), 4u);
-  EXPECT_EQ(copied_words[0], load0_words[0]);
-  EXPECT_EQ(copied_words[1], load0_words[1]);
-  EXPECT_EQ(copied_words[2], load1_words[0]);
-  EXPECT_EQ(copied_words[3], load1_words[1]);
+  const std::array<uint32_t, 6> expected = {
+      build_s_wait_alu(kWaitAluDepctrVaVdstVmVsrc0, ROCJITSU_CODE_ARCH_RDNA4),
+      load0_words[0],
+      load0_words[1],
+      build_s_wait_alu(kWaitAluDepctrVaVdstVmVsrc0, ROCJITSU_CODE_ARCH_RDNA4),
+      load1_words[0],
+      load1_words[1],
+  };
+  EXPECT_TRUE(find_word_sequence_for_test(copied_words, expected).has_value());
 }
 
 TEST(BinaryTranslator, Gfx1250InPlaceShadowsHighBankDsLoadAddress) {

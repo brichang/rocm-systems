@@ -74,6 +74,8 @@ constexpr uint16_t kTtmpRdna4GridX = 9;
          arch == ROCJITSU_CODE_ARCH_RDNA4;
 }
 
+[[nodiscard]] bool uses_gfx10_plus_rsrc3(rj_code_arch_t arch) { return is_rdna_arch(arch); }
+
 [[nodiscard]] bool is_gfx1250_arch(rj_code_arch_t arch) {
   return arch == ROCJITSU_CODE_ARCH_GFX1250;
 }

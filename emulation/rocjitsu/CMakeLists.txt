@@ -219,8 +219,6 @@ add_dependencies(rocjitsu_shared flatbuffers_schemas)
 # Developer and test workflow tools.
 add_subdirectory(tools)
 
-# Tests and scaling tools.
-add_subdirectory(tools)
 if(BUILD_TESTING)
     add_subdirectory(tests)
 endif()

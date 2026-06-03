@@ -3809,15 +3809,22 @@ has_reachable_indirect_control_flow(std::span<const KernelTranslationScope> scop
 [[nodiscard]] bool
 supports_expanded_text_copy(rj_code_arch_t guest_arch, rj_code_arch_t host_arch, uint64_t text_size,
                             uint64_t protected_text_bytes,
-                            std::span<const KdTranslation>,
+                            std::span<const KdTranslation> descriptor_translations,
                             std::span<const KernelTranslationScope> scopes) {
   if (guest_arch != ROCJITSU_CODE_ARCH_GFX1250 || host_arch != ROCJITSU_CODE_ARCH_RDNA4)
     return false;
   if (text_size <= kSoppBranchMaxForwardBytes)
     return false;
-  if (protected_text_bytes * 2 <= text_size)
-    return false;
   if (has_reachable_indirect_control_flow(scopes))
+    return false;
+  for (const KdTranslation &translation : descriptor_translations) {
+    if (translation.prologue_words.empty())
+      continue;
+    int16_t branch_dwords = 0;
+    if (!compute_sopp_branch_offset(translation.entry_text_offset, text_size, branch_dwords))
+      return true;
+  }
+  if (protected_text_bytes * 2 <= text_size)
     return false;
   return true;
 }

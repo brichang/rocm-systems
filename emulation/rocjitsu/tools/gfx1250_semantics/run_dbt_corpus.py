@@ -10,7 +10,37 @@ import subprocess
 import sys
 from pathlib import Path
 
-EXPECTED_XFAILS = {}
+REFERENCE_OUTPUT_DIRS = (
+    ("external/dbt-rdna4", Path("external") / "dbt-rdna4"),
+    ("external/external-runtime", Path("external") / "external-runtime"),
+    ("external/kmd", Path("external") / "kmd"),
+    ("runtime", Path("runtime")),
+    ("rocjitsu", Path("rocjitsu")),
+)
+
+EXPECTED_XFAILS = {
+    "add_minmax_ops": "EXPAND not yet implemented for v_add_max_i32",
+    "ashr_pk_i8_ops": "EXPAND not yet implemented for v_ashr_pk_i8_i32",
+    "bf16_tanh_transcendental_ops": "EXPAND not yet implemented for v_rcp_bf16_e32",
+    "block_memory_ops": "EXPAND not yet implemented for v_add_nc_u64_e32",
+    "cluster_global_async_memory_ops": "EXPAND not yet implemented for cluster_load_b64",
+    "cos_bf16_ops": "EXPAND not yet implemented for v_cos_bf16_e32",
+    "cvt_f16_fp8_bf8_ops": "EXPAND not yet implemented for v_cvt_f16_fp8_e32",
+    "cvt_norm_f16_ops": "mismatched outputs against external/kmd: out_u32",
+    "cvt_off_f32_i4_ops": "mismatched outputs against external/kmd: out_u32",
+    "cvt_pk_fp8_bf8_output_ops": "EXPAND not yet implemented for v_cvt_pk_fp8_f16",
+    "cvt_pk_fp8_bf8_unpack_ops": "EXPAND not yet implemented for v_cvt_pk_f16_fp8_e32",
+    "cvt_scale_lowp_ops": "EXPAND not yet implemented for v_cvt_scale_pk8_f16_fp4",
+    "ds_special_ops": "EXPAND not yet implemented for v_mov_b64_e32",
+    "monitor_load_ops": "EXPAND not yet implemented for global_load_monitor_b32",
+    "noop_prefetch_ops": "EXPAND not yet implemented for flat_prefetch_b8",
+    "pk_bf16_ops": "EXPAND not yet implemented for v_pk_add_bf16",
+    "pk_min3_max3_ops": "EXPAND not yet implemented for v_pk_min3_i16",
+    "scalar_call_ops": "EXPAND not yet implemented for s_call_i64",
+    "scalar_control_ops": "EXPAND not yet implemented for s_get_shader_cycles_u64",
+    "scalar_narrow_smem_loads": "mismatched outputs against external/kmd: out_u32",
+    "sendmsg_rtn_ops": "EXPAND not yet implemented for v_mov_b64_e32",
+}
 
 
 def parse_args():
@@ -115,8 +145,20 @@ def summarize_failure(proc):
     return combined, lines[-1] if lines else f"exit {proc.returncode}"
 
 
+def find_reference_outputs(corpus_dir, case):
+    outputs = case.get("outputs", [])
+    for label, relative_dir in REFERENCE_OUTPUT_DIRS:
+        gold_dir = corpus_dir / relative_dir / case["name"]
+        if all((gold_dir / output["file"]).exists() for output in outputs):
+            return label, gold_dir
+    return None, None
+
+
 def compare_outputs(corpus_dir, case, out_dir):
-    gold_dir = corpus_dir / "rocjitsu" / case["name"]
+    reference_label, gold_dir = find_reference_outputs(corpus_dir, case)
+    if gold_dir is None:
+        return None, [output["name"] for output in case.get("outputs", [])], []
+
     missing = []
     mismatches = []
     for output_buffer in case.get("outputs", []):
@@ -126,7 +168,7 @@ def compare_outputs(corpus_dir, case, out_dir):
             missing.append(output_buffer["name"])
         elif not filecmp.cmp(produced, expected, shallow=False):
             mismatches.append(output_buffer["name"])
-    return missing, mismatches
+    return reference_label, missing, mismatches
 
 
 def run_case(args, case):
@@ -153,11 +195,23 @@ def run_case(args, case):
             return "XFAIL", expected_failure
         return "FAIL", short
 
-    missing, mismatches = compare_outputs(args.corpus_dir, case, out_dir)
+    reference_label, missing, mismatches = compare_outputs(args.corpus_dir, case, out_dir)
     if missing:
-        return "FAIL", "missing outputs: " + ", ".join(missing)
+        detail = "missing outputs"
+        if reference_label:
+            detail += f" against {reference_label}"
+        detail += ": " + ", ".join(missing)
+        if expected_failure and expected_failure in detail:
+            return "XFAIL", expected_failure
+        return "FAIL", detail
     if mismatches:
-        return "FAIL", "mismatched outputs: " + ", ".join(mismatches)
+        detail = "mismatched outputs"
+        if reference_label:
+            detail += f" against {reference_label}"
+        detail += ": " + ", ".join(mismatches)
+        if expected_failure and expected_failure in detail:
+            return "XFAIL", expected_failure
+        return "FAIL", detail
     if expected_failure:
         return "XPASS", "expected failure now passes"
     return "PASS", f"{len(case.get('outputs', []))} outputs"

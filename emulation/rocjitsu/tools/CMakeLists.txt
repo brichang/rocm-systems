@@ -27,6 +27,19 @@ set(RJ_TRANSLATE_OBJECT_LIBS
     rocjitsu_config
 )
 
+add_library(rocjitsu_tooling STATIC dbt_translate.cpp)
+target_include_directories(rocjitsu_tooling PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_include_directories(rocjitsu_tooling PUBLIC ${CMAKE_SOURCE_DIR})
+target_link_libraries(
+    rocjitsu_tooling
+    PUBLIC ${RJ_TRANSLATE_OBJECT_LIBS} util flatbuffers Threads::Threads
+)
+rj_configure_target(rocjitsu_tooling TOOL)
+
+add_executable(rj_dbt_translate dbt_translate_main.cpp)
+target_link_libraries(rj_dbt_translate PRIVATE rocjitsu_tooling)
+rj_configure_target(rj_dbt_translate TOOL)
+
 add_executable(
     rocjitsu-translate-code-object
     rocjitsu_translate_code_object.cpp
