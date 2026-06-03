@@ -148,6 +148,47 @@ TEST_F(test_source_snapshot_t, CopyFailureOnOneEntryDoesNotAbortOthers)
     EXPECT_TRUE(fs::exists(good_dest)) << "valid entry must still be copied";
 }
 
+TEST_F(test_source_snapshot_t, TraversalPathNotCopiedValidStillCopied)
+{
+    // A crafted comment path with leading ".." segments must never produce a
+    // copy outside dest_root; the valid entry alongside it is still copied.
+    const fs::path good = m_src_root / "ok.cpp";
+    write_file(good, "// ok\n");
+
+    // Sibling of dest_root that an unguarded join could escape to. It must be
+    // left untouched (neither created nor overwritten) by the traversal entry.
+    const fs::path sibling = m_tmp / "escaped.cpp";
+    ASSERT_FALSE(fs::exists(sibling));
+
+    const std::string traversal = "../escaped.cpp";
+    EXPECT_NO_THROW(copy_source_files({traversal, good.string()}, m_dest_root));
+
+    EXPECT_FALSE(fs::exists(sibling)) << "traversal entry escaped dest_root";
+    EXPECT_TRUE(fs::exists(m_dest_root / good.relative_path()));
+}
+
+TEST_F(test_source_snapshot_t, SymlinkSkippedValidStillCopied)
+{
+    const fs::path good = m_src_root / "real.cpp";
+    write_file(good, "// real\n");
+
+    // A symlink pointing at a real regular file must be skipped (symlink_status
+    // does not follow links) rather than chased into its target.
+    const fs::path target = m_src_root / "target.cpp";
+    write_file(target, "// target\n");
+    const fs::path link = m_src_root / "link.cpp";
+    std::error_code ec;
+    fs::create_symlink(target, link, ec);
+    ASSERT_FALSE(ec) << "failed to create symlink: " << ec.message();
+
+    EXPECT_NO_THROW(copy_source_files({link.string(), good.string()}, m_dest_root));
+
+    EXPECT_FALSE(fs::exists(m_dest_root / link.relative_path()))
+        << "symlink must not be reproduced under dest_root";
+    EXPECT_TRUE(fs::exists(m_dest_root / good.relative_path()))
+        << "regular file must still be copied";
+}
+
 // ---------------------------------------------------------------------------
 // collect_source_paths (through the mock translator)
 // ---------------------------------------------------------------------------

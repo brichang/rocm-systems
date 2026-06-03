@@ -4,6 +4,7 @@
 import argparse
 import os
 import shlex
+import shutil
 import time
 from pathlib import Path
 from typing import Union, cast
@@ -73,12 +74,15 @@ class PCSamplingProfiler:
         self,
         profiler_options: ProfilerOptions,
     ) -> None:
-        """Remove leftover ``ps_file_*`` outputs from a prior PC-sampling-only
-        sdk run.
+        """Remove leftover PC-sampling outputs from a prior PC-sampling-only run.
 
         PC sampling writes ``ps_file_*`` directly into the workload directory
-        (see ``_launch_sdk``). When re-profiling into an existing directory we
-        delete those stale files so the new run does not mix in old results.
+        (see ``_launch_sdk``) and the native tool emits per-PID
+        ``*_code_obj_info.json`` plus a ``code_obj_sources/`` snapshot. When
+        re-profiling into an existing directory we delete all of these so the new
+        run does not mix in old results -- ``load_code_obj_info`` merges every
+        ``*_code_obj_info.json`` it finds, so a leftover from a different PID
+        would otherwise be folded into the fresh capture.
         """
         if not (self.is_exclusive() and self._profiler == "rocprofiler-sdk"):
             return
@@ -92,6 +96,25 @@ class PCSamplingProfiler:
                 console_debug(f"Failed to remove stale PC sampling output: {stale}")
             else:
                 console_debug(f"Removed stale PC sampling output: {stale}")
+        for stale in workload_dir.glob("*_code_obj_info.json"):
+            try:
+                stale.unlink()
+            except OSError:
+                console_debug(f"Failed to remove stale PC sampling output: {stale}")
+            else:
+                console_debug(f"Removed stale PC sampling output: {stale}")
+        snapshot_dir = workload_dir / "code_obj_sources"
+        if snapshot_dir.is_dir():
+            try:
+                shutil.rmtree(snapshot_dir)
+            except OSError:
+                console_debug(
+                    f"Failed to remove stale PC sampling output: {snapshot_dir}"
+                )
+            else:
+                console_debug(
+                    f"Removed stale PC sampling output: {snapshot_dir}"
+                )
 
     def _launch(
         self,

@@ -26,6 +26,7 @@ from utils.parser import (
     match_instruction_for_offset,
     nullify_unevaluated_metric_values,
     resolve_snapshot_source_path,
+    resolve_source_file,
     search_pc_sampling_record,
     split_instruction_comment,
 )
@@ -909,6 +910,42 @@ def test_resolve_snapshot_source_path_unparsable_comment(tmp_path: Path) -> None
     assert resolve_snapshot_source_path("noColon", tmp_path) is None
 
 
+def test_resolve_snapshot_source_path_rejects_traversal(tmp_path: Path) -> None:
+    """A '..' path that would escape code_obj_sources/ resolves to None."""
+    assert resolve_snapshot_source_path("../../etc/passwd:1", tmp_path) is None
+
+
+# ═══════════════════════════════════════════════════════════════
+# resolve_source_file (bare path, native attribution path)
+# ═══════════════════════════════════════════════════════════════
+
+
+def test_resolve_source_file_keeps_present_original(tmp_path: Path) -> None:
+    """An existing capture-host path is returned unchanged."""
+    src = tmp_path / "kernel.hip"
+    src.write_text("// src\n")
+    assert resolve_source_file(str(src), tmp_path) == str(src)
+
+
+def test_resolve_source_file_redirects_to_snapshot(tmp_path: Path) -> None:
+    """A missing original redirects to the code_obj_sources/ snapshot copy."""
+    missing = "/nonexistent/build/kernel.hip"
+    snapshot = tmp_path / "code_obj_sources" / missing.lstrip("/")
+    snapshot.parent.mkdir(parents=True)
+    snapshot.write_text("// snapshot\n")
+    assert resolve_source_file(missing, tmp_path) == str(snapshot)
+
+
+def test_resolve_source_file_keeps_original_when_no_snapshot(tmp_path: Path) -> None:
+    """A missing original with no snapshot copy is returned unchanged."""
+    assert resolve_source_file("/gone/kernel.hip", tmp_path) == "/gone/kernel.hip"
+
+
+def test_resolve_source_file_none_passthrough(tmp_path: Path) -> None:
+    """A None source_file yields None."""
+    assert resolve_source_file(None, tmp_path) is None
+
+
 # ═══════════════════════════════════════════════════════════════
 # Helpers for native code-object JSON
 # ═══════════════════════════════════════════════════════════════
@@ -1059,6 +1096,50 @@ def test_load_code_obj_info_skips_malformed_entries(tmp_path: Path) -> None:
     assert merged is not None
     assert len(merged[2]) == 1
     assert merged[2][0]["name"] == "v_add_u32"
+
+
+def test_load_code_obj_info_skips_code_object_without_id(tmp_path: Path) -> None:
+    """A code_objects entry missing 'id' is skipped; a valid sibling survives."""
+    data = {
+        "code_objects": [
+            {  # no "id" -> skipped
+                "symbols": [
+                    {
+                        "name": "orphan",
+                        "instructions": [
+                            {
+                                "name": "v_nop",
+                                "comment": "/home/u/orphan.hip:1",
+                                "code_obj_offset": 0,
+                                "size": 4,
+                            }
+                        ],
+                    }
+                ],
+            },
+            {
+                "id": 7,
+                "symbols": [
+                    {
+                        "name": "vecAdd",
+                        "instructions": [
+                            {
+                                "name": "v_mul_f32",
+                                "comment": "/home/u/add.hip:7",
+                                "code_obj_offset": 0,
+                                "size": 8,
+                            }
+                        ],
+                    }
+                ],
+            },
+        ]
+    }
+    (tmp_path / "111_code_obj_info.json").write_text(json.dumps(data))
+    merged = load_code_obj_info(tmp_path)
+    assert merged is not None
+    assert set(merged.keys()) == {7}
+    assert merged[7][0]["name"] == "v_mul_f32"
 
 
 def test_load_code_obj_info_skips_unreadable_file(tmp_path: Path) -> None:
@@ -1215,7 +1296,7 @@ def test_calc_pc_sampling_data_native_branch(tmp_path: Path) -> None:
     assert row4["line"] == "43"
 
 
-def test_attribute_pc_samples_native_no_match_offset() -> None:
+def test_attribute_pc_samples_native_no_match_offset(tmp_path: Path) -> None:
     """An offset that falls in a gap yields None for every native column."""
     code_obj_info = {
         2: [
@@ -1236,7 +1317,7 @@ def test_attribute_pc_samples_native_no_match_offset() -> None:
     # Offset 8 falls in the [4, 16) gap; offset 16 matches the second interval.
     grouped_df = pd.DataFrame({"code_object_id": [2, 2], "code_object_offset": [8, 16]})
 
-    columns = _attribute_pc_samples_native(grouped_df, code_obj_info)
+    columns = _attribute_pc_samples_native(grouped_df, code_obj_info, tmp_path)
 
     # Gap offset -> all native columns None.
     assert columns["instruction"][0] is None

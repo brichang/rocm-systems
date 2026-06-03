@@ -51,6 +51,7 @@ from utils.parser import (
     PC_SAMPLING_NOT_ISSUE_PREFIX,
     load_code_obj_info,
     match_instruction_for_offset,
+    resolve_source_file,
     split_instruction_comment,
 )
 from utils.roofline_calc import (
@@ -69,17 +70,21 @@ _PC_NATIVE_COLUMNS = ("instruction", "source_line", "source_file", "line")
 def _attribute_pc_samples_native(
     grouped_df: pd.DataFrame,
     code_obj_info: dict[int, list[dict[str, Any]]],
+    workload_dir: Path,
 ) -> dict[str, list[Optional[str]]]:
     """Attribute grouped PC samples to native ISA instructions.
 
     Returns the ``instruction``/``source_line``/``source_file``/``line`` columns
     keyed by name. The per-code-object offset key lists are built once here so the
     per-sample lookup stays O(log N) instead of rebuilding the list on every row.
+    ``source_file`` is redirected to the ``code_obj_sources/`` snapshot when the
+    capture-host path is gone (off-host analysis), reusing ``workload_dir``.
     """
     columns: dict[str, list[Optional[str]]] = {col: [] for col in _PC_NATIVE_COLUMNS}
     # Build the offset key list only for code objects actually sampled, memoized
     # so each referenced coid pays the construction cost at most once.
     offsets_by_coid: dict[int, list[int]] = {}
+    source_cache: dict[str, Optional[str]] = {}
 
     def _offsets_for(coid: int, intervals: list[dict[str, Any]]) -> list[int]:
         cached = offsets_by_coid.get(coid)
@@ -98,7 +103,9 @@ def _attribute_pc_samples_native(
             source_file, line = split_instruction_comment(inst["comment"])
             columns["instruction"].append(inst["name"])
             columns["source_line"].append(inst["comment"])
-            columns["source_file"].append(source_file)
+            columns["source_file"].append(
+                resolve_source_file(source_file, workload_dir, source_cache)
+            )
             columns["line"].append(line)
         else:
             console_debug(f"No native instruction for code_object {coid} offset {off}.")
@@ -510,7 +517,13 @@ class db_analysis(OmniAnalyze_Base):
                     "Attributing PC samples using native *_code_obj_info.json "
                     f"for {workload_path}."
                 )
-                native_columns = _attribute_pc_samples_native(grouped_df, code_obj_info)
+                native_columns = _attribute_pc_samples_native(
+                    grouped_df, code_obj_info, Path(workload_path)
+                )
+                # source_file/line are part of the calc_pc_sampling_data
+                # DataFrame contract (spec 6.2); the ORM intentionally does not
+                # persist them yet -- the lookup-table schema is a separate
+                # effort (spec non-goal "No new analysis database schema").
                 for col, values in native_columns.items():
                     grouped_df[col] = values
             else:

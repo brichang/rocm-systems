@@ -4,6 +4,7 @@
 import argparse
 import bisect
 import json
+import os
 import re
 from pathlib import Path
 from typing import Any, Optional, Union
@@ -702,15 +703,14 @@ def load_pc_sampling_data_per_kernel(
     # Load source code comments (if available)
     pc_sample_comments = search_key_in_json(file_name, "pc_sample_comments")
     workload_dir = Path(file_name).parent
+    _source_cache: dict[str, Optional[str]] = {}
 
-    def _display_source(index: int) -> Optional[str]:
+    def _display_source(index: int) -> object:
         if index >= len(pc_sample_comments):
             return None
-        comment = pc_sample_comments[index]
-        resolved = resolve_snapshot_source_path(comment, workload_dir)
-        if resolved is not None:
-            return resolved
-        return f".../{Path(comment).name}"
+        return display_source_comment(
+            pc_sample_comments[index], workload_dir, _source_cache
+        )
 
     df["source_line"] = (
         df["inst_index"].apply(_display_source) if pc_sample_comments else None
@@ -829,14 +829,12 @@ def load_pc_sampling_data(
             ]
         ]
         workload_dir = Path(dir_path)
+        _source_cache: dict[str, Optional[str]] = {}
 
         def _display_source(comment: object) -> object:
             if not isinstance(comment, str) or not comment:
                 return comment
-            resolved = resolve_snapshot_source_path(comment, workload_dir)
-            if resolved is not None:
-                return resolved
-            return f".../{Path(comment).name}"
+            return display_source_comment(comment, workload_dir, _source_cache)
 
         grouped_counts["source_line"] = grouped_counts["source_line"].apply(
             _display_source
@@ -887,7 +885,9 @@ def split_instruction_comment(
     """Split an ISA comment at the last ':' into (source_file, line).
 
     Returns (None, None) when comment is empty/None, contains no ':', or either
-    side of the last ':' is empty. The line is always returned as a string.
+    side of the last ':' is empty. ``line`` is returned as a string (not int)
+    because a comment may carry a non-numeric or multi-source tail; the raw
+    comment is retained separately for those cases.
 
     Examples:
         "/a/b.cpp:42" -> ("/a/b.cpp", "42")
@@ -910,31 +910,93 @@ def resolve_snapshot_source_path(
 
     Source paths baked into the disassembly are absolute on the capture host and
     may not exist when the workload is analyzed elsewhere. PC sampling collection
-    snapshots the referenced files under ``<workload>/code_obj_sources/`` (the
-    leading ``/`` is dropped, mirroring ``copy_source_files``). When the original
-    path is missing but a snapshot copy exists, return ``"<snapshot>:line"`` so
-    the displayed reference points at a file that actually exists.
+    snapshots the referenced files under ``<workload>/code_obj_sources/``. When
+    the original path is missing but a snapshot copy exists, return
+    ``"<snapshot>:line"`` so the displayed reference points at a file that
+    actually exists.
 
     Returns None when there is no usable path, when the original file is still
     present (keep the default display), or when no snapshot copy is found.
     """
+    source_file, line = split_instruction_comment(comment)
+    resolved = resolve_source_file(source_file, workload_dir)
+    if resolved is None or resolved == source_file:
+        return None
+    return f"{resolved}:{line}"
+
+
+def display_source_comment(
+    comment: str,
+    workload_dir: Path,
+    cache: Optional[dict[str, Optional[str]]] = None,
+) -> str:
+    """Render an ISA ``path:line`` comment for display (``comment`` is a str).
+
+    Returns the snapshot-redirected reference when the capture-host file is gone
+    but a copy exists under ``code_obj_sources/``; otherwise a ``.../<name>``
+    abbreviation. Callers apply their own empty/non-str guard before calling, so
+    the two display paths keep their existing handling of blank comments.
+    ``cache``, when supplied, memoizes the result per comment so the same file is
+    stat'd at most once across a full column ``apply``.
+    """
+    if cache is not None and comment in cache:
+        return cache[comment]
+    resolved = resolve_snapshot_source_path(comment, workload_dir)
+    display = resolved if resolved is not None else f".../{Path(comment).name}"
+    if cache is not None:
+        cache[comment] = display
+    return display
+
+
+def resolve_source_file(
+    source_file: Optional[str],
+    workload_dir: Path,
+    cache: Optional[dict[str, Optional[str]]] = None,
+) -> Optional[str]:
+    """Return the best on-disk path for ``source_file`` (a bare path, no line).
+
+    Keeps the original when it still exists on the analyze host; otherwise
+    redirects to the ``code_obj_sources/`` snapshot copied at collection so
+    off-host analysis resolves to a file that exists. Falls back to the original
+    when no snapshot is found. ``cache`` memoizes the stat lookups per path.
+    """
+    if source_file is None:
+        return None
+    if cache is not None and source_file in cache:
+        return cache[source_file]
 
     def _exists(path: Path) -> bool:
-        # Baked paths may point at inaccessible mounts on the analyze host;
-        # treat any stat error as "not present" rather than propagating.
         try:
             return path.exists()
         except OSError:
             return False
 
-    source_file, line = split_instruction_comment(comment)
-    if source_file is None or _exists(Path(source_file)):
-        return None
+    resolved = source_file
+    if not _exists(Path(source_file)):
+        snapshot = resolve_snapshot_path(source_file, workload_dir)
+        if snapshot is not None and _exists(snapshot):
+            resolved = str(snapshot)
+    if cache is not None:
+        cache[source_file] = resolved
+    return resolved
 
-    snapshot = workload_dir / "code_obj_sources" / source_file.lstrip("/")
-    if _exists(snapshot):
-        return f"{snapshot}:{line}"
-    return None
+
+def resolve_snapshot_path(
+    source_file: str, workload_dir: Path
+) -> Optional[Path]:
+    """Map a capture-host source path to its snapshot under the workload dir.
+
+    Mirrors ``copy_source_files`` (the leading ``/`` is dropped and ``..``
+    segments are normalized away). Returns None when the normalized path would
+    escape ``<workload>/code_obj_sources/`` so a crafted comment cannot point the
+    lookup outside the snapshot tree.
+    """
+    root = workload_dir / "code_obj_sources"
+    candidate = os.path.normpath(str(root / source_file.lstrip("/")))
+    root_str = os.path.normpath(str(root))
+    if candidate != root_str and not candidate.startswith(root_str + os.sep):
+        return None
+    return Path(candidate)
 
 
 @demarcate

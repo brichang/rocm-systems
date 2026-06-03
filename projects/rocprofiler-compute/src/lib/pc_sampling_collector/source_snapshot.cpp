@@ -62,7 +62,15 @@ void rocprofiler_compute_tool::copy_source_files(const std::vector<std::string>&
             continue;
         }
 
-        std::filesystem::copy_file(src, dest, std::filesystem::copy_options::overwrite_existing, ec);
+        // skip_symlinks: the symlink_status guard above already rejected a
+        // symlinked final component, but pass it here too so copy_file never
+        // dereferences a link (defence against a check->copy swap / symlinked
+        // intermediate component).
+        std::filesystem::copy_file(src,
+                                   dest,
+                                   std::filesystem::copy_options::overwrite_existing |
+                                       std::filesystem::copy_options::skip_symlinks,
+                                   ec);
         if (ec)
         {
             std::clog << "[rocprofiler-compute] [" << __FUNCTION__
