@@ -244,6 +244,12 @@ virtualMemoryManagement:
   Unit_hipMemUnmap_Bookkeeping_CrossLinksTornDown: *level_2
   Unit_hipMemUnmap_Bookkeeping_RemapRewiresCrossLinks: *level_2
   Unit_hipMemUnmap_DirectPath_AbortsOnFirstError: *level_2
+  Unit_hipMemUnmap_DirectPath_BasicRoundTrip: *level_2
+  Unit_hipMemUnmap_DirectPath_MappingDeviceAlwaysIncluded: *level_2
+  Unit_hipMemUnmap_DirectPath_AccessDeviceSyncedOnce: *level_2
+  Unit_hipMemUnmap_DirectPath_ReleasesGaOnFullSuccess: *level_2
+  Unit_hipMemUnmap_DirectPath_RetainsGaOnFailure: *level_2
+  Unit_hipMemUnmap_DirectPath_InFlightKernelDrained: *level_2
   Unit_hipMemUnmap_PalDirectPath_WaitsForInFlightKernel: *level_2
   Unit_hipMemMapArrayAsync_Positive_Basic:
     <<: *level_2
