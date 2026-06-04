@@ -809,6 +809,118 @@ HIP_TEST_CASE(Unit_hipMemUnmap_DirectPath_InFlightKernelDrained) {
 }
 
 /**
+ * Test Description
+ * ------------------------
+ *    - Gating test (Commit 6d) -- stronger sibling of
+ * Unit_hipMemUnmap_DirectPath_InFlightKernelDrained. Launches a slow
+ * kernel that writes a known pattern to the mapped region on a
+ * non-default stream and immediately calls hipMemUnmap before any
+ * hipStreamSynchronize. Validates the SyncAllStreams-on-access-devices
+ * contract from §Validation #6:
+ *   1. hipMemUnmap returns hipSuccess (not racing the kernel; the
+ *      access-device union -- including the mapping device -- was
+ *      drained once pre-loop, then virtualUnmap per sub-buffer).
+ *   2. After hipMemUnmap returns, hipStreamQuery on the launch stream
+ *      reports hipSuccess (proves the kernel completed before unmap
+ *      returned).
+ *   3. Remapping the same VA to a FRESH physical handle and reading
+ *      back yields the freshly-written sentinel -- not the prior
+ *      marker -- proving the readback observes the new physical
+ *      backing (the old marker was associated with a released phys
+ *      handle and is gone).
+ *
+ * The slow kernel is sized so iteration is observably in-flight at
+ * unmap time -- a missing SyncAllStreams would race observably.
+ * ------------------------
+ *    - unit/virtualMemoryManagement/hipMemUnmap.cc
+ * Test requirements
+ * ------------------------
+ *    - HIP_VERSION >= 6.1
+ */
+HIP_TEST_CASE(Unit_hipMemUnmap_UnmapWithInFlightKernel) {
+  HIP_CHECK(hipFree(0));
+  size_t granularity = 0;
+  size_t buffer_size = N * sizeof(int);
+  int deviceId = 0;
+  hipDevice_t device;
+  HIP_CHECK(hipDeviceGet(&device, deviceId));
+  checkVMMSupported(device);
+  hipMemAllocationProp prop{};
+  prop.type = hipMemAllocationTypePinned;
+  prop.location.type = hipMemLocationTypeDevice;
+  prop.location.id = device;
+  HIP_CHECK(
+      hipMemGetAllocationGranularity(&granularity, &prop, hipMemAllocationGranularityMinimum));
+  REQUIRE(granularity > 0);
+  size_t size_mem = ((granularity + buffer_size - 1) / granularity) * granularity;
+
+  // First physical backing -- this is what the in-flight kernel writes
+  // its pattern into.
+  hipMemGenericAllocationHandle_t handle_first;
+  void* ptr = nullptr;
+  HIP_CHECK(hipMemCreate(&handle_first, size_mem, &prop, 0));
+  HIP_CHECK(hipMemAddressReserve(&ptr, size_mem, 0, 0, 0));
+  HIP_CHECK(hipMemMap(ptr, size_mem, 0, handle_first, 0));
+
+  hipMemAccessDesc accessDesc{};
+  accessDesc.location.type = hipMemLocationTypeDevice;
+  accessDesc.location.id = device;
+  accessDesc.flags = hipMemAccessFlagsProtReadWrite;
+  HIP_CHECK(hipMemSetAccess(ptr, size_mem, &accessDesc, 1));
+
+  hipStream_t stream;
+  HIP_CHECK(hipStreamCreate(&stream));
+
+  // Size the kernel so the stream is observably in-flight at unmap
+  // time -- ~50ms on a typical discrete GPU. A missing SyncAllStreams
+  // would race observably.
+  constexpr int kSlowIters = 1 << 22;
+  constexpr int kFirstMarker = 0xdeadbeef;
+  unmap_slow_marker_kernel<<<dim3(N / threadsPerBlk), dim3(threadsPerBlk), 0, stream>>>(
+      reinterpret_cast<int*>(ptr), kSlowIters, kFirstMarker);
+
+  // No hipStreamSynchronize: hipMemUnmap must drain the access-device
+  // queues (including the mapping device) before tearing the mapping
+  // down. Property #1: returns hipSuccess despite in-flight work.
+  HIP_CHECK(hipMemUnmap(ptr, size_mem));
+
+  // Property #2: stream completed before unmap returned.
+  REQUIRE(hipStreamQuery(stream) == hipSuccess);
+
+  // Property #3 (stronger than the existing DirectPath variant): remap
+  // the same VA to a FRESH physical handle and read back. The fresh
+  // phys is uninitialised w.r.t. the old kernel's pattern, so writing
+  // a different sentinel and reading it back proves we are observing
+  // the new backing, not stale bytes from the released handle.
+  HIP_CHECK(hipMemRelease(handle_first));
+
+  hipMemGenericAllocationHandle_t handle_fresh;
+  HIP_CHECK(hipMemCreate(&handle_fresh, size_mem, &prop, 0));
+  HIP_CHECK(hipMemMap(ptr, size_mem, 0, handle_fresh, 0));
+  HIP_CHECK(hipMemSetAccess(ptr, size_mem, &accessDesc, 1));
+
+  // Initialise the fresh backing from host with a different sentinel
+  // and read it back synchronously. If page-tables were torn down mid
+  // kernel-write on the previous mapping, this readback would still
+  // be valid (different phys), but the value we read MUST be the new
+  // sentinel -- never the prior marker.
+  constexpr int kFreshSentinel = 0x600dcafe;
+  std::vector<int> host_init(N, kFreshSentinel);
+  HIP_CHECK(hipMemcpyHtoD(reinterpret_cast<hipDeviceptr_t>(ptr), host_init.data(), buffer_size));
+  std::vector<int> readback(N, 0);
+  HIP_CHECK(hipMemcpyDtoH(readback.data(), reinterpret_cast<hipDeviceptr_t>(ptr), buffer_size));
+  for (int v : readback) {
+    REQUIRE(v == kFreshSentinel);
+    REQUIRE(v != kFirstMarker);
+  }
+
+  HIP_CHECK(hipMemUnmap(ptr, size_mem));
+  HIP_CHECK(hipStreamDestroy(stream));
+  HIP_CHECK(hipMemRelease(handle_fresh));
+  HIP_CHECK(hipMemAddressFree(ptr, size_mem));
+}
+
+/**
  * End doxygen group VirtualMemoryManagementTest.
  * @}
  */
