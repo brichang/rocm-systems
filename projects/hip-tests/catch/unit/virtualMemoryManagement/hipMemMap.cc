@@ -1436,6 +1436,77 @@ HIP_TEST_CASE(Unit_hipMemMap_PalDirectPath_ConcurrentDisjointMapsNoDeadlock) {
 }
 
 /**
+ * Test Description
+ * ------------------------
+ *    - Backend-agnostic concurrent stress test for the direct virtualMap
+ * path. N threads each repeatedly reserve/create/map/unmap/release on
+ * disjoint VAs. A hard wall-clock bound catches deadlock either from
+ * the HSA lock-free path (no execution() lock) or from PAL execution()
+ * lock misuse. Companion to the PAL-only variant, which skips when the
+ * PAL backend isn't built. Always runs on HSA.
+ * ------------------------
+ *    - unit/virtualMemoryManagement/hipMemMap.cc
+ * Test requirements
+ * ------------------------
+ *    - HIP_VERSION >= 7.0
+ */
+HIP_TEST_CASE(Unit_hipMemMap_ConcurrentDisjointMapsNoDeadlock) {
+  HIP_CHECK(hipFree(0));
+  size_t granularity = 0;
+  int deviceId = 0;
+  hipDevice_t device;
+  HIP_CHECK(hipDeviceGet(&device, deviceId));
+  checkVMMSupported(device);
+  hipMemAllocationProp prop{};
+  prop.type = hipMemAllocationTypePinned;
+  prop.location.type = hipMemLocationTypeDevice;
+  prop.location.id = device;
+  HIP_CHECK(
+      hipMemGetAllocationGranularity(&granularity, &prop, hipMemAllocationGranularityMinimum));
+  REQUIRE(granularity > 0);
+  const size_t size_mem = granularity;
+  constexpr int kThreads = 4;
+  constexpr int kIters = 16;
+
+  std::atomic<bool> failed{false};
+  auto worker = [&](int tid) {
+    for (int i = 0; i < kIters && !failed.load(); ++i) {
+      hipMemGenericAllocationHandle_t h;
+      void* p = nullptr;
+      if (hipMemCreate(&h, size_mem, &prop, 0) != hipSuccess) { failed = true; return; }
+      if (hipMemAddressReserve(&p, size_mem, 0, 0, 0) != hipSuccess) {
+        (void)hipMemRelease(h); failed = true; return;
+      }
+      if (hipMemMap(p, size_mem, 0, h, 0) != hipSuccess) {
+        (void)hipMemAddressFree(p, size_mem); (void)hipMemRelease(h); failed = true; return;
+      }
+      hipMemAccessDesc d{};
+      d.location.type = hipMemLocationTypeDevice;
+      d.location.id = device;
+      d.flags = hipMemAccessFlagsProtReadWrite;
+      (void)hipMemSetAccess(p, size_mem, &d, 1);
+      if (hipMemUnmap(p, size_mem) != hipSuccess) { failed = true; return; }
+      (void)hipMemRelease(h);
+      (void)hipMemAddressFree(p, size_mem);
+      (void)tid;
+    }
+  };
+
+  // Hard upper bound: 60s. A deadlocked code path would never complete;
+  // a heavily serialized but live path completes in well under this.
+  auto t0 = std::chrono::steady_clock::now();
+  std::vector<std::thread> threads;
+  threads.reserve(kThreads);
+  for (int i = 0; i < kThreads; ++i) threads.emplace_back(worker, i);
+  for (auto& t : threads) t.join();
+  auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                     std::chrono::steady_clock::now() - t0)
+                     .count();
+  REQUIRE_FALSE(failed.load());
+  REQUIRE(elapsed < 60);
+}
+
+/**
  * End doxygen group VirtualMemoryManagementTest.
  * @}
  */

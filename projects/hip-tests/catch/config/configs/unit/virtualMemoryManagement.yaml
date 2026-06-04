@@ -236,6 +236,7 @@ virtualMemoryManagement:
   Unit_hipMemMap_DirectPath_NoImplicitSync: *level_2
   Unit_hipMemMap_PalDirectPath_BasicRoundTrip: *level_2
   Unit_hipMemMap_PalDirectPath_ConcurrentDisjointMapsNoDeadlock: *level_2
+  Unit_hipMemMap_ConcurrentDisjointMapsNoDeadlock: *level_2
   Unit_hipMemRelease_negative:
     <<: *level_2
     # Patch which removes the typetraits implementation from std namespace in hiprtc is reverted
