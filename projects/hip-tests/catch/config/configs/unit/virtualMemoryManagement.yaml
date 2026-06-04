@@ -264,3 +264,9 @@ virtualMemoryManagement:
     # Below tests are failing PSDB
     disabled: [nvidia_linux, nvidia_windows]
   Unit_hipMemSetAccess_SegmentsAccess: *level_2
+  Unit_hipMemSetAccess_CrossDeviceNoAccessFaults:
+    <<: *level_2
+    tags: [multigpu]
+  Unit_hipMemSetAccess_RevokedAccessFaults:
+    <<: *level_2
+    tags: [multigpu]
