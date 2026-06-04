@@ -258,6 +258,7 @@ virtualMemoryManagement:
   Unit_hipMemUnmap_DirectPath_InFlightKernelDrained: *level_2
   Unit_hipMemUnmap_UnmapWithInFlightKernel: *level_2
   Unit_hipMemUnmap_PalDirectPath_WaitsForInFlightKernel: *level_2
+  Unit_hipMemUnmap_ReleaseHandleBeforeUnmapThenReuseVA: *level_2
   Unit_hipMemMapArrayAsync_Positive_Basic:
     <<: *level_2
     tags: [image]

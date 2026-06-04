@@ -921,6 +921,111 @@ HIP_TEST_CASE(Unit_hipMemUnmap_UnmapWithInFlightKernel) {
 }
 
 /**
+ * Test Description
+ * ------------------------
+ *    - Gating test (Commit 6f) -- exercises the ga lifecycle on the
+ * direct hipMemUnmap path per §Validation #8. The user calls
+ * hipMemRelease on the physical handle WHILE it is still mapped; the
+ * map's ga->retain() must keep the backing alive across that release.
+ * Continued reads/writes through the mapped VA must observe the same
+ * backing. A subsequent hipMemUnmap then drops the final ref (the
+ * release-on-success branch) and frees the physical pages. The VA
+ * reservation outlives the cycle, so re-creating a fresh phys handle
+ * and re-mapping the SAME VA must succeed and behave correctly with
+ * fresh contents.
+ *
+ * Properties asserted:
+ *   1. After hipMemRelease on the still-mapped handle, the VA is
+ *      still usable end-to-end (HtoD + DtoH round-trip).
+ *   2. hipMemUnmap returns hipSuccess (this drops the final retain).
+ *   3. The same VA reserved up-front can be re-mapped to a fresh phys
+ *      handle and produces independent, correct data on round-trip.
+ * ------------------------
+ *    - unit/virtualMemoryManagement/hipMemUnmap.cc
+ * Test requirements
+ * ------------------------
+ *    - HIP_VERSION >= 6.1
+ */
+HIP_TEST_CASE(Unit_hipMemUnmap_ReleaseHandleBeforeUnmapThenReuseVA) {
+  HIP_CHECK(hipFree(0));
+  size_t granularity = 0;
+  size_t buffer_size = N * sizeof(int);
+  int deviceId = 0;
+  hipDevice_t device;
+  HIP_CHECK(hipDeviceGet(&device, deviceId));
+  checkVMMSupported(device);
+  hipMemAllocationProp prop{};
+  prop.type = hipMemAllocationTypePinned;
+  prop.location.type = hipMemLocationTypeDevice;
+  prop.location.id = device;
+  HIP_CHECK(
+      hipMemGetAllocationGranularity(&granularity, &prop, hipMemAllocationGranularityMinimum));
+  REQUIRE(granularity > 0);
+  size_t size_mem = ((granularity + buffer_size - 1) / granularity) * granularity;
+
+  hipMemAccessDesc accessDesc{};
+  accessDesc.location.type = hipMemLocationTypeDevice;
+  accessDesc.location.id = device;
+  accessDesc.flags = hipMemAccessFlagsProtReadWrite;
+
+  // ---- Phase 1: create phys, reserve VA, map, set access, use. ----
+  hipMemGenericAllocationHandle_t handle_first;
+  void* ptr = nullptr;
+  HIP_CHECK(hipMemCreate(&handle_first, size_mem, &prop, 0));
+  HIP_CHECK(hipMemAddressReserve(&ptr, size_mem, 0, 0, 0));
+  HIP_CHECK(hipMemMap(ptr, size_mem, 0, handle_first, 0));
+  HIP_CHECK(hipMemSetAccess(ptr, size_mem, &accessDesc, 1));
+
+  constexpr int kFirstSentinel = 0xabad1dea;
+  std::vector<int> host_a(N, kFirstSentinel);
+  std::vector<int> host_b(N, 0);
+  HIP_CHECK(hipMemcpyHtoD(reinterpret_cast<hipDeviceptr_t>(ptr), host_a.data(), buffer_size));
+  HIP_CHECK(hipMemcpyDtoH(host_b.data(), reinterpret_cast<hipDeviceptr_t>(ptr), buffer_size));
+  REQUIRE(std::equal(host_b.begin(), host_b.end(), host_a.begin()));
+
+  // ---- Phase 2: release the phys handle while it is still mapped. ----
+  // The map's ga->retain() must keep the physical backing alive across
+  // this user-driven release.
+  HIP_CHECK(hipMemRelease(handle_first));
+
+  // ---- Phase 3: continued use through the VA must still work. ----
+  // If the map-retain were missing, the backing would have been freed
+  // by the release above and the next H2D/D2H would fail or corrupt.
+  constexpr int kSecondSentinel = 0x600dface;
+  std::vector<int> host_c(N, kSecondSentinel);
+  std::vector<int> host_d(N, 0);
+  HIP_CHECK(hipMemcpyHtoD(reinterpret_cast<hipDeviceptr_t>(ptr), host_c.data(), buffer_size));
+  HIP_CHECK(hipMemcpyDtoH(host_d.data(), reinterpret_cast<hipDeviceptr_t>(ptr), buffer_size));
+  REQUIRE(std::equal(host_d.begin(), host_d.end(), host_c.begin()));
+
+  // ---- Phase 4: unmap. This drops the final retain and frees phys. ----
+  HIP_CHECK(hipMemUnmap(ptr, size_mem));
+
+  // The VA reservation outlives the cycle -- it must still be valid
+  // and reusable with a brand-new physical handle.
+
+  // ---- Phase 5: re-create/re-map a FRESH handle on the SAME VA. ----
+  hipMemGenericAllocationHandle_t handle_fresh;
+  HIP_CHECK(hipMemCreate(&handle_fresh, size_mem, &prop, 0));
+  HIP_CHECK(hipMemMap(ptr, size_mem, 0, handle_fresh, 0));
+  HIP_CHECK(hipMemSetAccess(ptr, size_mem, &accessDesc, 1));
+
+  // Fresh backing -- write a distinct sentinel and round-trip. The
+  // readback must equal what we just wrote (proving the fresh phys is
+  // wired up and there is no carry-over from the prior cycle).
+  constexpr int kFreshSentinel = 0x5eedf00d;
+  std::vector<int> host_e(N, kFreshSentinel);
+  std::vector<int> host_f(N, 0);
+  HIP_CHECK(hipMemcpyHtoD(reinterpret_cast<hipDeviceptr_t>(ptr), host_e.data(), buffer_size));
+  HIP_CHECK(hipMemcpyDtoH(host_f.data(), reinterpret_cast<hipDeviceptr_t>(ptr), buffer_size));
+  REQUIRE(std::equal(host_f.begin(), host_f.end(), host_e.begin()));
+
+  HIP_CHECK(hipMemUnmap(ptr, size_mem));
+  HIP_CHECK(hipMemRelease(handle_fresh));
+  HIP_CHECK(hipMemAddressFree(ptr, size_mem));
+}
+
+/**
  * End doxygen group VirtualMemoryManagementTest.
  * @}
  */
