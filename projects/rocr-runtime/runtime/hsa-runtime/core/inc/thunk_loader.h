@@ -368,6 +368,7 @@ class ThunkLoader {
                                       HSAuint64 size, \
                                       HSAuint64 addr);
     typedef HSAKMT_STATUS (HSAKMT_DEF(hsaKmtMemHandleFree))(HsaMemoryObjectHandle Handle);
+    typedef HSAKMT_STATUS (HSAKMT_DEF(hsaKmtMemHandleFreePreserveMetadata))(HsaMemoryObjectHandle Handle);
     typedef HSAKMT_STATUS (HSAKMT_DEF(hsaKmtMemoryGetCpuAddr))(HsaAMDGPUDeviceHandle DeviceHandle, \
                                       HsaMemoryObjectHandle MemoryHandle, \
                                       HSAint32* fd, \
@@ -534,6 +535,7 @@ class ThunkLoader {
     HSAKMT_DEF(hsaKmtMemoryVaMap)* HSAKMT_PFN(hsaKmtMemoryVaMap);
     HSAKMT_DEF(hsaKmtMemoryVaUnmap)* HSAKMT_PFN(hsaKmtMemoryVaUnmap);
     HSAKMT_DEF(hsaKmtMemHandleFree)* HSAKMT_PFN(hsaKmtMemHandleFree);
+    HSAKMT_DEF(hsaKmtMemHandleFreePreserveMetadata)* HSAKMT_PFN(hsaKmtMemHandleFreePreserveMetadata);
     HSAKMT_DEF(hsaKmtMemoryGetCpuAddr)* HSAKMT_PFN(hsaKmtMemoryGetCpuAddr);
     HSAKMT_DEF(hsaKmtMemoryCpuMap)* HSAKMT_PFN(hsaKmtMemoryCpuMap);
     HSAKMT_DEF(hsaKmtGetNodeWallclockFrequency)* HSAKMT_PFN(hsaKmtGetNodeWallclockFrequency);

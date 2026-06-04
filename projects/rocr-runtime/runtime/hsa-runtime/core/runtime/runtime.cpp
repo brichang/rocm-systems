@@ -378,6 +378,14 @@ hsa_status_t Runtime::FreeMemory(void* ptr) {
     allocation_map_.erase(it);
   }
 
+  // Remove IPC socket server bookkeeping for this allocation.
+  // This prevents stale ipc_sock_server_conns_ entries if exported memory
+  // is freed before a later import/ack cleanup path occurs.
+  {
+    std::lock_guard<std::mutex> lock(ipc_sock_server_lock_);
+    ipc_sock_server_conns_.erase(reinterpret_cast<uint64_t>(ptr));
+  }
+
   // Notifiers can't run while holding the lock or the callback won't be able to manage memory.
   // The memory triggering the notification has already been removed from the memory map so can't
   // be double released during the callback.
@@ -1414,7 +1422,10 @@ hsa_status_t Runtime::IPCCreate(void* ptr, size_t len, hsa_amd_ipc_memory_t* han
     }
     // Reuse token already stored on the BO
     if (res.metadata != 0) handle->handle[7] = res.metadata;
-    allocation_map_[ptr].thunk_bo = res.buf_handle;
+    // Release the imported BO handle immediately after setting metadata.
+    // Using hsaKmtMemHandleFreePreserveMetadata instead of hsaKmtMemHandleFree
+    // to preserve metadata for later IPC attach operations.
+    HSAKMT_CALL(hsaKmtMemHandleFreePreserveMetadata(res.buf_handle));
   }
 
   runtime_singleton_->DmaBufClose(dmabuf_fd);
@@ -1512,17 +1523,21 @@ int Runtime::IPCClientImport(uint32_t conn_handle, uint64_t dmabuf_fd_handle,
         return -1;
       }
 
-      // Store the buffer object handle in allocation map for later use.
-      // If a stale entry exists at this VA (from a previous import that was
-      // never detached), free the old BO first to avoid leaking it.
-      if (status == HSAKMT_STATUS_SUCCESS) {
+      // For system memory imports, store the BO handle for later CPU mapping.
+      // For GPU memory imports, free the handle immediately - its only used
+      // for metadata validation; the actual GPU registration is done by
+      // hsaKmtRegisterGraphicsHandleToNodesExt and is cleaned up via
+      // hsaKmtDeregisterMemory in IPCDetach.
+      if (isDmabufSysmem) {
         std::lock_guard<std::shared_mutex> lock(memory_lock_);
         auto [it, inserted] = allocation_map_.try_emplace(
-        *importAddress, nullptr, *importSize, *importSize, core::MemoryRegion::AllocateNoFlags);
+            *importAddress, nullptr, *importSize, *importSize, core::MemoryRegion::AllocateNoFlags);
         if (!inserted && it->second.thunk_bo) {
           HSAKMT_CALL(hsaKmtMemHandleFree(it->second.thunk_bo));
         }
         it->second.thunk_bo = res.buf_handle;
+      } else {
+        HSAKMT_CALL(hsaKmtMemHandleFree(res.buf_handle));
       }
       runtime_singleton_->DmaBufClose(static_cast<int>(dmabuf_fd));
     }
@@ -1544,15 +1559,22 @@ hsa_status_t Runtime::IPCAttach(const hsa_amd_ipc_memory_t* handle, size_t len, 
   bool isFragment = false;
   uint32_t fragOffset = 0;
 
-  auto fixFragment = [&](HsaMemoryObjectHandle thunk_bo) {
+  auto fixFragment = [&](HsaMemoryObjectHandle new_thunk_bo) {
     if (isFragment) {
       importAddress = reinterpret_cast<uint8_t*>(importAddress) + fragOffset;
       len = Min(len, importSize - fragOffset);
     }
     std::lock_guard<std::shared_mutex> lock(memory_lock_);
-    allocation_map_.try_emplace(
+    auto [it, inserted] = allocation_map_.try_emplace(
         importAddress, nullptr, len, len, core::MemoryRegion::AllocateNoFlags);
-    allocation_map_[importAddress].thunk_bo = thunk_bo;
+    // If a new thunk_bo is provided, store it. If an entry already exists with
+    // a different thunk_bo, free the old one first to avoid leaking it.
+    if (new_thunk_bo) {
+      if (it->second.thunk_bo && it->second.thunk_bo != new_thunk_bo) {
+        HSAKMT_CALL(hsaKmtMemHandleFree(it->second.thunk_bo));
+      }
+      it->second.thunk_bo = new_thunk_bo;
+    }
   };
 
   auto importMemory = [&](unsigned int numNodes, HSAuint32 *nodes, bool isSysMem) {
