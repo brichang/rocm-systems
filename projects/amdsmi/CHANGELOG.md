@@ -8,6 +8,12 @@ Full documentation for amd_smi_lib is available at [https://rocm.docs.amd.com/pr
 
 ### Added
 
+- **Added `amd-smi metric --partition` flag to display per-partition GPU metrics**.  
+  - New `-X`/`--partition` flag displays hierarchical partition metrics for multi-partition GPUs:
+    - **AID**: VCLK/DCLK/SCLK clocks with min/max limits, VCN/JPEG activity percentages
+    - **MID**: SOC clock frequency and temperature
+    - **XCP**: GFX clocks with min/max limits, lock status, GFX_BUSY_INST/JPEG_BUSY/VCN_BUSY usage, throttle accumulation counters, violation status and activity fields, and XCD temperatures
+
 - **Added IFoE/UALoE fabric telemetry and topology support**.  
   - New `amd-smi fabric` CLI subcommand with `--topology` / `-t` and `--info` / `-i` flags for querying fabric (UALoE) information.
   - New C APIs: `amdsmi_get_fabric_telemetry_data()` and `amdsmi_get_gpu_fabric_info()`.
