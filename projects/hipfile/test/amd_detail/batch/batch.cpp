@@ -500,8 +500,7 @@ TEST_F(HipFileBatchContext, SubmitOverCapacityOverMultipleSubmissions)
         _context->submitOperations(&io_params, 1);
     }
 
-    EXPECT_CALL(*mock_driver_state, getFileAndBuffer).Times(0);
-    ASSERT_THROW(_context->submitOperations(nullptr, 1), BatchFull);
+    ASSERT_THROW(_context->submitOperations(&io_params, 1), BatchFull);
 }
 
 TEST_F(HipFileBatchContext, SubmitBatchWithBadOpDoesNotRecordGoodOps)

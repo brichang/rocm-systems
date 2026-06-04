@@ -298,14 +298,15 @@ void
 BatchContext::submitOperations(const hipFileIOParams_t *params, unsigned num_params,
                                IBatchOperationFactory *operation_factory)
 {
-    std::unique_lock<std::shared_mutex> _ulock{context_mutex};
-
-    // Check num_params first before doing anything else
-    if (num_params > capacity - outstanding_ops.size()) {
+    if (num_params > capacity) {
         throw BatchFull();
+    }
+    if (num_params > 0 && params == nullptr) {
+        throw std::invalid_argument("Batch IO params cannot be null");
     }
 
     std::vector<std::shared_ptr<IBatchOperation>> pending_ops{};
+    pending_ops.reserve(num_params);
     BatchOperationFactory   default_factory{};
     IBatchOperationFactory &factory = operation_factory == nullptr ? default_factory : *operation_factory;
 
@@ -321,6 +322,12 @@ BatchContext::submitOperations(const hipFileIOParams_t *params, unsigned num_par
         auto op = factory.create(std::move(param_copy), std::move(_buffer), std::move(_file));
 
         pending_ops.push_back(std::move(op));
+    }
+
+    std::unique_lock<std::shared_mutex> _ulock{context_mutex};
+
+    if (num_params > capacity - outstanding_ops.size()) {
+        throw BatchFull();
     }
 
     // All submitted operations look valid at this point. Accept them.
