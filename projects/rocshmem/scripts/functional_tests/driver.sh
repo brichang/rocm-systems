@@ -136,6 +136,16 @@ declare -A TEST_NUMBERS=(
   ["fence_putlargesmall"]="100"
   ["fence_fanout"]="101"
   ["fence_putwavenbichunks"]="102"
+  ["ipc_host_putmem"]="103"
+  ["ipc_host_getmem"]="104"
+  ["ipc_host_amo_fadd"]="105"
+  ["ipc_host_amo_fcswap"]="106"
+  ["ipc_host_ctx_putmem"]="107"
+  ["ipc_host_ctx_getmem"]="108"
+  ["ipc_host_int_amo_fadd"]="109"
+  ["ipc_host_int_amo_fcswap"]="110"
+  ["ipc_host_amo_all_pes"]="111"
+  ["ipc_host_amo_self"]="112"
 )
 
 ExecTest() {
@@ -197,6 +207,7 @@ ExecTest() {
         -x "ROCSHMEM_MAX_NUM_CONTEXTS=$ROCSHMEM_MAX_NUM_CONTEXTS"
         -x "UCX_ROCM_IPC_SIGPOOL_MAX_ELEMS=16384"
         -x "ROCSHMEM_HEAP_SIZE=$HEAP_SIZE"
+        ${ROCSHMEM_MAX_NUM_HOST_CONTEXTS:+-x "ROCSHMEM_MAX_NUM_HOST_CONTEXTS=$ROCSHMEM_MAX_NUM_HOST_CONTEXTS"}
         ${ROCSHMEM_TEST_USE_DEFAULT_STREAM:+-x "ROCSHMEM_TEST_USE_DEFAULT_STREAM=$ROCSHMEM_TEST_USE_DEFAULT_STREAM"}
         ${ROCSHMEM_TEST_UUID:+-x "ROCSHMEM_TEST_UUID=$ROCSHMEM_TEST_UUID"}
         ${TIMEOUT:+--timeout "$TIMEOUT"}
@@ -260,6 +271,7 @@ ExecTest() {
   fi
 
   unset ROCSHMEM_MAX_NUM_CONTEXTS
+  unset ROCSHMEM_MAX_NUM_HOST_CONTEXTS
 }
 
 TestRMAPut() {
@@ -564,6 +576,33 @@ TestOnStream() {
   ExecTest  "broadcastmem_on_stream" 2  1           64        1048576
 }
 
+TestIpcHostRma() { #AIROCSHMEM-419
+  ##############################################################################
+  #       | Name                    | Ranks | WGs | Threads | Max Msg Size    #
+  # Run with ROCSHMEM_TEST_UUID=1 to exercise the non-MPI TcpBootstrap path. #
+  # IPC_HOST_NPES controls the PE count for the multi-PE concurrency tests.   #
+  # Default: 4. Override: IPC_HOST_NPES=8 ./driver.sh ...                     #
+  ##############################################################################
+  local npes=${IPC_HOST_NPES:-4}
+
+  # Default-context: rocshmem_fence / rocshmem_quiet
+  ExecTest  "ipc_host_putmem"         2        1      1        65536
+  ExecTest  "ipc_host_getmem"         2        1      1        65536
+  # Long (64-bit) AMOs: rocshmem_long_atomic_fetch_add/cas
+  ExecTest  "ipc_host_amo_fadd"       2        1      1
+  ExecTest  "ipc_host_amo_fcswap"     2        1      1
+  # Explicit-context: rocshmem_ctx_fence / rocshmem_ctx_quiet
+  # ROCSHMEM_MAX_NUM_HOST_CONTEXTS=2 — default context occupies slot 0, explicit ctx needs slot 1
+  ROCSHMEM_MAX_NUM_HOST_CONTEXTS=2 ExecTest "ipc_host_ctx_putmem"  2 1 1 65536
+  ROCSHMEM_MAX_NUM_HOST_CONTEXTS=2 ExecTest "ipc_host_ctx_getmem"  2 1 1 65536
+  # Int (32-bit) AMOs: rocshmem_int_atomic_fetch_add/cas (exercises 32-bit kernel path)
+  ExecTest  "ipc_host_int_amo_fadd"   2        1      1
+  ExecTest  "ipc_host_int_amo_fcswap" 2        1      1
+  # Concurrency tests — configurable PE count (IPC_HOST_NPES, default 4)
+  ExecTest  "ipc_host_amo_all_pes"    $npes    1      1
+  ExecTest  "ipc_host_amo_self"       $npes    1      1
+}
+
 TestOther() {
   ##############################################################################
   #       | Name             | Ranks | Workgroups | Threads | Max Message Size #
@@ -821,6 +860,7 @@ case $TEST in
     TestColl
     TestOther
     TestOnStream
+    TestIpcHostRma
     ;;
   *"rma")
     TestRMA

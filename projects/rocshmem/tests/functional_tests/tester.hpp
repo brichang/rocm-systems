@@ -144,7 +144,17 @@
   X(FenceOrderPutWaveSignal,   99)  \
   X(FenceOrderPutLargeSmall,   100) \
   X(FenceOrderFanout,          101) \
-  X(FenceOrderPutWaveNbiChunks, 102)
+  X(FenceOrderPutWaveNbiChunks, 102) \
+  X(IpcHostPutmem,              103) \
+  X(IpcHostGetmem,              104) \
+  X(IpcHostAmoFAdd,             105) \
+  X(IpcHostAmoFCswap,           106) \
+  X(IpcHostCtxPutmem,           107) \
+  X(IpcHostCtxGetmem,           108) \
+  X(IpcHostIntAmoFAdd,          109) \
+  X(IpcHostIntAmoFCswap,        110) \
+  X(IpcHostAmoAllPes,           111) \
+  X(IpcHostAmoSelf,             112)
 
 #define _ROCSHMEM_ENUM_ENTRY(name, val) name##TestType = val,
 enum TestType {
