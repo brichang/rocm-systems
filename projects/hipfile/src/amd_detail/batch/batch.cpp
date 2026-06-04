@@ -11,6 +11,8 @@
 #include "state.h"
 #include "thread-pool.h"
 
+#include <algorithm>
+#include <chrono>
 #include <cstddef>
 #include <memory>
 #include <mutex>
@@ -34,6 +36,27 @@ namespace {
     using batchOperationState::Running;
     using batchOperationState::Timeout;
     using batchOperationState::Waiting;
+
+    bool is_zero_timeout(const struct timespec *timeout) noexcept
+    {
+        return timeout != nullptr && timeout->tv_sec == 0 && timeout->tv_nsec == 0;
+    }
+
+    void validate_timeout(const struct timespec *timeout)
+    {
+        if (timeout == nullptr) {
+            return;
+        }
+        if (timeout->tv_sec < 0 || timeout->tv_nsec < 0 || timeout->tv_nsec >= 1000000000L) {
+            throw std::invalid_argument("Invalid batch status timeout");
+        }
+    }
+
+    std::chrono::steady_clock::time_point timeout_deadline(const struct timespec *timeout)
+    {
+        return std::chrono::steady_clock::now() + std::chrono::seconds{timeout->tv_sec} +
+               std::chrono::nanoseconds{timeout->tv_nsec};
+    }
 
 }
 
@@ -336,9 +359,94 @@ BatchContext::submitOperations(const hipFileIOParams_t *params, unsigned num_par
     }
     outstanding_ops.insert(pending_ops.begin(), pending_ops.end());
 
+    auto self = shared_from_this();
     for (const auto &op : pending_ops) {
-        task_group->run([op]() { op->run(); });
+        task_group->run([self, op]() {
+            op->run();
+            // Briefly serialize with any waiter mid-predicate-evaluation so notify_all is not
+            // delivered before the waiter has actually entered wait(). See condition_variable
+            // missed-wakeup pattern: state is mutated under per-op state_mutex, not the
+            // context_mutex the waiter passes to wait(), so context_mutex is needed here.
+            {
+                std::shared_lock<std::shared_mutex> _serialize{self->context_mutex};
+            }
+            self->status_cv.notify_all();
+        });
     }
+}
+
+void
+BatchContext::getStatus(unsigned min_nr, unsigned *nr, hipFileIOEvents_t *iocbp, struct timespec *timeout)
+{
+    if (nr == nullptr) {
+        throw std::invalid_argument("Number of events cannot be null");
+    }
+    if (*nr > 0 && iocbp == nullptr) {
+        throw std::invalid_argument("Event buffer cannot be null");
+    }
+    if (min_nr > *nr) {
+        throw std::invalid_argument("Minimum event count exceeds event buffer capacity");
+    }
+    validate_timeout(timeout);
+
+    const unsigned event_capacity = *nr;
+    *nr                           = 0;
+
+    std::unique_lock<std::shared_mutex> lock{context_mutex};
+
+    auto terminal_count = [this]() {
+        unsigned count = 0;
+        for (const auto &op : outstanding_ops) {
+            if (op->isTerminal()) {
+                count++;
+            }
+        }
+        return count;
+    };
+
+    auto collect_terminal_events = [this, event_capacity, nr, iocbp]() {
+        unsigned copied = 0;
+        for (auto op_iter = outstanding_ops.begin();
+             op_iter != outstanding_ops.end() && copied < event_capacity;) {
+            if (!(*op_iter)->isTerminal()) {
+                ++op_iter;
+                continue;
+            }
+
+            iocbp[copied++] = (*op_iter)->event();
+            op_iter         = outstanding_ops.erase(op_iter);
+        }
+        *nr = copied;
+        return copied;
+    };
+
+    if (outstanding_ops.empty() || event_capacity == 0) {
+        return;
+    }
+
+    // Cap to what's actually outstanding so an over-large min_nr does not block forever.
+    min_nr = std::min(min_nr, static_cast<unsigned>(outstanding_ops.size()));
+
+    if (min_nr == 0 || terminal_count() >= min_nr || is_zero_timeout(timeout)) {
+        collect_terminal_events();
+        return;
+    }
+
+    // The second clause guards against a concurrent getStatus() peer collecting terminal
+    // events out from under us and dropping outstanding_ops below the cap captured at entry —
+    // without it this waiter would block until timeout even though min_nr can no longer be met.
+    auto ready = [&terminal_count, min_nr, this]() {
+        return terminal_count() >= min_nr || outstanding_ops.size() < min_nr || outstanding_ops.empty();
+    };
+
+    if (timeout == nullptr) {
+        status_cv.wait(lock, ready);
+    }
+    else {
+        status_cv.wait_until(lock, timeout_deadline(timeout), ready);
+    }
+
+    collect_terminal_events();
 }
 
 void
