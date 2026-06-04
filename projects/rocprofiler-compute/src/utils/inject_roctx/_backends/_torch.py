@@ -776,6 +776,7 @@ EXTRA_STRUCTURAL_WRAPS = (
     ("torch.nn.functional", "mse_loss", "torch.nn.functional.mse_loss"),
     ("torch.nn.functional", "log_softmax", "torch.nn.functional.log_softmax"),
     ("torch.nn.functional", "softmax", "torch.nn.functional.softmax"),
+    ("torch.nn.functional", "relu", "torch.nn.functional.relu"),
 )
 
 
