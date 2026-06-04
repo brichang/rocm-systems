@@ -50,7 +50,7 @@ template <> hipError_t HandleException<hipError_t>() {
 }  // namespace hip
 
 #define TRY try {
-#define CATCH } catch(...) { return hip::HandleException<hipError_t>(); }
+#define CATCH } catch(...) { HIP_RETURN(hip::HandleException<hipError_t>()); }
 #define CATCHRET(RETURN_TYPE) } catch(...) { return hip::HandleException<RETURN_TYPE>(); }
 
 extern "C" hipError_t __hipPopCallConfiguration(dim3* gridDim, dim3* blockDim, size_t* sharedMem,
@@ -3137,6 +3137,18 @@ hipError_t hipLibraryGetKernelCount(unsigned int *count, hipLibrary_t library) {
   TRY;
   return hip::GetHipDispatchTable()->hipLibraryGetKernelCount_fn(count,
                                                                  library);
+  CATCH;
+}
+hipError_t hipLibraryGetGlobal(void** dptr, size_t* bytes, hipLibrary_t library,
+                               const char* name) {
+  TRY;
+  return hip::GetHipDispatchTable()->hipLibraryGetGlobal_fn(dptr, bytes, library, name);
+  CATCH;
+}
+hipError_t hipLibraryGetManaged(void** dptr, size_t* bytes, hipLibrary_t library,
+                                const char* name) {
+  TRY;
+  return hip::GetHipDispatchTable()->hipLibraryGetManaged_fn(dptr, bytes, library, name);
   CATCH;
 }
 hipError_t hipKernelGetAttribute(int* pi, hipFunction_attribute attrib, hipKernel_t kernel,
