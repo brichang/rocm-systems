@@ -222,6 +222,9 @@ virtualMemoryManagement:
     # (amd_wsl) Patch which removes the typetraits implementation from std namespace in hiprtc is reverted
     disabled: [amd_windows, amd_wsl]
   Unit_hipMemMap_Capture: *level_2
+  Unit_hipMemMap_Bookkeeping_CrossLinksWired: *level_2
+  Unit_hipMemMap_Bookkeeping_MultiAliasCrossLinks: *level_2
+  Unit_hipMemMap_Bookkeeping_MemObjMapInsertion: *level_2
   Unit_hipMemRelease_negative:
     <<: *level_2
     # Patch which removes the typetraits implementation from std namespace in hiprtc is reverted
@@ -232,6 +235,8 @@ virtualMemoryManagement:
     # Patch which removes the typetraits implementation from std namespace in hiprtc is reverted
     disabled: [amd_wsl]
   Unit_hipMemUnmap_Capture: *level_2
+  Unit_hipMemUnmap_Bookkeeping_CrossLinksTornDown: *level_2
+  Unit_hipMemUnmap_Bookkeeping_RemapRewiresCrossLinks: *level_2
   Unit_hipMemMapArrayAsync_Positive_Basic:
     <<: *level_2
     tags: [image]

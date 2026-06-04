@@ -782,6 +782,171 @@ HIP_TEST_CASE(Unit_hipMemMap_Positive_APU_LargeAllocSpill) {
 }
 
 /**
+ * Test Description
+ * ------------------------
+ *    - Characterization test for submitVirtualMap bookkeeping:
+ * after hipMemMap, the bidirectional cross-link
+ * (vaddr_sub_obj.phys_mem_obj -> phys, phys.vaddr_mem_obj -> sub_obj)
+ * must be wired so that hipMemRetainAllocationHandle (which walks
+ * sub_obj -> phys -> ga) returns the original handle. Pins behavior
+ * around the MapMemObjBookkeeping / FinalizeMapMemObjBookkeeping
+ * helper extraction (Commit 1 of hipMemMap refactor).
+ * ------------------------
+ *    - unit/virtualMemoryManagement/hipMemMap.cc
+ * Test requirements
+ * ------------------------
+ *    - HIP_VERSION >= 6.1
+ */
+HIP_TEST_CASE(Unit_hipMemMap_Bookkeeping_CrossLinksWired) {
+  HIP_CHECK(hipFree(0));
+  size_t granularity = 0;
+  size_t buffer_size = N * sizeof(int);
+  int deviceId = 0;
+  hipDevice_t device;
+  HIP_CHECK(hipDeviceGet(&device, deviceId));
+  checkVMMSupported(device);
+  hipMemAllocationProp prop{};
+  prop.type = hipMemAllocationTypePinned;
+  prop.location.type = hipMemLocationTypeDevice;
+  prop.location.id = device;
+  HIP_CHECK(
+      hipMemGetAllocationGranularity(&granularity, &prop, hipMemAllocationGranularityMinimum));
+  REQUIRE(granularity > 0);
+  size_t size_mem = ((granularity + buffer_size - 1) / granularity) * granularity;
+
+  hipMemGenericAllocationHandle_t handle;
+  void* ptr = nullptr;
+  HIP_CHECK(hipMemCreate(&handle, size_mem, &prop, 0));
+  HIP_CHECK(hipMemAddressReserve(&ptr, size_mem, 0, 0, 0));
+  HIP_CHECK(hipMemMap(ptr, size_mem, 0, handle, 0));
+
+  // Cross-link observable: hipMemRetainAllocationHandle walks
+  //   vaddr_sub_obj.phys_mem_obj -> phys.user_data.data (ga)
+  // Both directions of the cross-link plus MemObjMap::AddMemObj at
+  // ptr must be in place for this to return the original handle.
+  hipMemGenericAllocationHandle_t retrieved = nullptr;
+  HIP_CHECK(hipMemRetainAllocationHandle(&retrieved, ptr));
+  REQUIRE(retrieved == handle);
+  HIP_CHECK(hipMemRelease(retrieved));
+
+  HIP_CHECK(hipMemUnmap(ptr, size_mem));
+  HIP_CHECK(hipMemRelease(handle));
+  HIP_CHECK(hipMemAddressFree(ptr, size_mem));
+}
+
+/**
+ * Test Description
+ * ------------------------
+ *    - Characterization test for the multi-alias case of the
+ * bookkeeping helper. One physical handle mapped to multiple VAs:
+ * each VA must independently resolve back to the same handle via
+ * hipMemRetainAllocationHandle. Validates that
+ * FinalizeMapMemObjBookkeeping creates a fresh sub_obj per map and
+ * wires the cross-link on each, and that the shared phys backing's
+ * vaddr_mem_obj pointer being overwritten by later maps does NOT
+ * sever the reverse path used by retainAllocationHandle (which goes
+ * sub_obj -> phys -> ga, not phys -> sub_obj).
+ * ------------------------
+ *    - unit/virtualMemoryManagement/hipMemMap.cc
+ * Test requirements
+ * ------------------------
+ *    - HIP_VERSION >= 6.1
+ */
+HIP_TEST_CASE(Unit_hipMemMap_Bookkeeping_MultiAliasCrossLinks) {
+  HIP_CHECK(hipFree(0));
+  size_t granularity = 0;
+  size_t buffer_size = N * sizeof(int);
+  int deviceId = 0;
+  hipDevice_t device;
+  HIP_CHECK(hipDeviceGet(&device, deviceId));
+  checkVMMSupported(device);
+  hipMemAllocationProp prop{};
+  prop.type = hipMemAllocationTypePinned;
+  prop.location.type = hipMemLocationTypeDevice;
+  prop.location.id = device;
+  HIP_CHECK(
+      hipMemGetAllocationGranularity(&granularity, &prop, hipMemAllocationGranularityMinimum));
+  REQUIRE(granularity > 0);
+  size_t size_mem = ((granularity + buffer_size - 1) / granularity) * granularity;
+
+  hipMemGenericAllocationHandle_t handle;
+  HIP_CHECK(hipMemCreate(&handle, size_mem, &prop, 0));
+
+  void* ptrs[num_buf] = {nullptr, nullptr, nullptr};
+  for (int i = 0; i < num_buf; ++i) {
+    HIP_CHECK(hipMemAddressReserve(&ptrs[i], size_mem, 0, 0, 0));
+    HIP_CHECK(hipMemMap(ptrs[i], size_mem, 0, handle, 0));
+  }
+
+  // Every alias must resolve sub_obj -> phys -> ga back to handle.
+  for (int i = 0; i < num_buf; ++i) {
+    hipMemGenericAllocationHandle_t retrieved = nullptr;
+    HIP_CHECK(hipMemRetainAllocationHandle(&retrieved, ptrs[i]));
+    REQUIRE(retrieved == handle);
+    HIP_CHECK(hipMemRelease(retrieved));
+  }
+
+  for (int i = 0; i < num_buf; ++i) {
+    HIP_CHECK(hipMemUnmap(ptrs[i], size_mem));
+    HIP_CHECK(hipMemAddressFree(ptrs[i], size_mem));
+  }
+  HIP_CHECK(hipMemRelease(handle));
+}
+
+/**
+ * Test Description
+ * ------------------------
+ *    - Characterization test for the MemObjMap insertion done by
+ * FinalizeMapMemObjBookkeeping. After hipMemMap the VA must resolve
+ * to a backing handle via hipMemRetainAllocationHandle; before
+ * hipMemMap (only reserved, never mapped) it must NOT. Pins the
+ * AddMemObj / RemoveMemObj behavior the helper guarantees.
+ * ------------------------
+ *    - unit/virtualMemoryManagement/hipMemMap.cc
+ * Test requirements
+ * ------------------------
+ *    - HIP_VERSION >= 6.1
+ */
+HIP_TEST_CASE(Unit_hipMemMap_Bookkeeping_MemObjMapInsertion) {
+  HIP_CHECK(hipFree(0));
+  size_t granularity = 0;
+  size_t buffer_size = N * sizeof(int);
+  int deviceId = 0;
+  hipDevice_t device;
+  HIP_CHECK(hipDeviceGet(&device, deviceId));
+  checkVMMSupported(device);
+  hipMemAllocationProp prop{};
+  prop.type = hipMemAllocationTypePinned;
+  prop.location.type = hipMemLocationTypeDevice;
+  prop.location.id = device;
+  HIP_CHECK(
+      hipMemGetAllocationGranularity(&granularity, &prop, hipMemAllocationGranularityMinimum));
+  REQUIRE(granularity > 0);
+  size_t size_mem = ((granularity + buffer_size - 1) / granularity) * granularity;
+
+  hipMemGenericAllocationHandle_t handle;
+  void* ptr = nullptr;
+  HIP_CHECK(hipMemCreate(&handle, size_mem, &prop, 0));
+  HIP_CHECK(hipMemAddressReserve(&ptr, size_mem, 0, 0, 0));
+
+  // Before map: VA reserved but no MemObjMap entry at ptr ->
+  // retainAllocationHandle must fail.
+  hipMemGenericAllocationHandle_t retrieved = nullptr;
+  REQUIRE(hipMemRetainAllocationHandle(&retrieved, ptr) == hipErrorInvalidValue);
+
+  HIP_CHECK(hipMemMap(ptr, size_mem, 0, handle, 0));
+
+  // After map: MemObjMap::AddMemObj wired by FinalizeMapMemObjBookkeeping.
+  HIP_CHECK(hipMemRetainAllocationHandle(&retrieved, ptr));
+  REQUIRE(retrieved == handle);
+  HIP_CHECK(hipMemRelease(retrieved));
+
+  HIP_CHECK(hipMemUnmap(ptr, size_mem));
+  HIP_CHECK(hipMemRelease(handle));
+  HIP_CHECK(hipMemAddressFree(ptr, size_mem));
+}
+
+/**
  * End doxygen group VirtualMemoryManagementTest.
  * @}
  */

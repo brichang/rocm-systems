@@ -112,6 +112,121 @@ HIP_TEST_CASE(Unit_hipMemUnmap_Capture) {
 }
 
 /**
+ * Test Description
+ * ------------------------
+ *    - Characterization test for UnmapMemObjBookkeeping. After
+ * hipMemUnmap, the sub_obj must be removed from MemObjMap and the
+ * vaddr<->phys cross-link torn down. Observable: a subsequent
+ * hipMemRetainAllocationHandle on the (still-reserved) VA must
+ * return hipErrorInvalidValue. Pins the RemoveMemObj + cross-link
+ * clear + sub_obj.release() steps of the unmap bookkeeping helper.
+ * ------------------------
+ *    - unit/virtualMemoryManagement/hipMemUnmap.cc
+ * Test requirements
+ * ------------------------
+ *    - HIP_VERSION >= 6.1
+ */
+HIP_TEST_CASE(Unit_hipMemUnmap_Bookkeeping_CrossLinksTornDown) {
+  HIP_CHECK(hipFree(0));
+  size_t granularity = 0;
+  size_t buffer_size = N * sizeof(int);
+  int deviceId = 0;
+  hipDevice_t device;
+  HIP_CHECK(hipDeviceGet(&device, deviceId));
+  checkVMMSupported(device);
+  hipMemAllocationProp prop{};
+  prop.type = hipMemAllocationTypePinned;
+  prop.location.type = hipMemLocationTypeDevice;
+  prop.location.id = device;
+  HIP_CHECK(
+      hipMemGetAllocationGranularity(&granularity, &prop, hipMemAllocationGranularityMinimum));
+  REQUIRE(granularity > 0);
+  size_t size_mem = ((granularity + buffer_size - 1) / granularity) * granularity;
+
+  hipMemGenericAllocationHandle_t handle;
+  void* ptr = nullptr;
+  HIP_CHECK(hipMemCreate(&handle, size_mem, &prop, 0));
+  HIP_CHECK(hipMemAddressReserve(&ptr, size_mem, 0, 0, 0));
+  HIP_CHECK(hipMemMap(ptr, size_mem, 0, handle, 0));
+
+  // Sanity: cross-link is wired pre-unmap.
+  hipMemGenericAllocationHandle_t retrieved = nullptr;
+  HIP_CHECK(hipMemRetainAllocationHandle(&retrieved, ptr));
+  REQUIRE(retrieved == handle);
+  HIP_CHECK(hipMemRelease(retrieved));
+
+  HIP_CHECK(hipMemUnmap(ptr, size_mem));
+
+  // After unmap: MemObjMap::RemoveMemObj must have run and the
+  // cross-link must be torn down. retainAllocationHandle on the
+  // still-reserved VA must now fail.
+  REQUIRE(hipMemRetainAllocationHandle(&retrieved, ptr) == hipErrorInvalidValue);
+
+  HIP_CHECK(hipMemRelease(handle));
+  HIP_CHECK(hipMemAddressFree(ptr, size_mem));
+}
+
+/**
+ * Test Description
+ * ------------------------
+ *    - Characterization test for the map/unmap/remap cycle through
+ * the bookkeeping helper. Pin that after an unmap the same VA can
+ * be re-mapped (potentially with a different handle) and the
+ * cross-link gets rewired to the new handle. Demonstrates the
+ * unmap helper fully clears the prior MemObjMap entry + cross-links
+ * so a fresh map sees a clean slot.
+ * ------------------------
+ *    - unit/virtualMemoryManagement/hipMemUnmap.cc
+ * Test requirements
+ * ------------------------
+ *    - HIP_VERSION >= 6.1
+ */
+HIP_TEST_CASE(Unit_hipMemUnmap_Bookkeeping_RemapRewiresCrossLinks) {
+  HIP_CHECK(hipFree(0));
+  size_t granularity = 0;
+  size_t buffer_size = N * sizeof(int);
+  int deviceId = 0;
+  hipDevice_t device;
+  HIP_CHECK(hipDeviceGet(&device, deviceId));
+  checkVMMSupported(device);
+  hipMemAllocationProp prop{};
+  prop.type = hipMemAllocationTypePinned;
+  prop.location.type = hipMemLocationTypeDevice;
+  prop.location.id = device;
+  HIP_CHECK(
+      hipMemGetAllocationGranularity(&granularity, &prop, hipMemAllocationGranularityMinimum));
+  REQUIRE(granularity > 0);
+  size_t size_mem = ((granularity + buffer_size - 1) / granularity) * granularity;
+
+  hipMemGenericAllocationHandle_t handle1, handle2;
+  HIP_CHECK(hipMemCreate(&handle1, size_mem, &prop, 0));
+  HIP_CHECK(hipMemCreate(&handle2, size_mem, &prop, 0));
+
+  void* ptr = nullptr;
+  HIP_CHECK(hipMemAddressReserve(&ptr, size_mem, 0, 0, 0));
+
+  HIP_CHECK(hipMemMap(ptr, size_mem, 0, handle1, 0));
+  hipMemGenericAllocationHandle_t retrieved = nullptr;
+  HIP_CHECK(hipMemRetainAllocationHandle(&retrieved, ptr));
+  REQUIRE(retrieved == handle1);
+  HIP_CHECK(hipMemRelease(retrieved));
+
+  HIP_CHECK(hipMemUnmap(ptr, size_mem));
+
+  // Helper cleared the slot -- remap with different handle must succeed
+  // and the cross-link must point at handle2 (not the stale handle1).
+  HIP_CHECK(hipMemMap(ptr, size_mem, 0, handle2, 0));
+  HIP_CHECK(hipMemRetainAllocationHandle(&retrieved, ptr));
+  REQUIRE(retrieved == handle2);
+  HIP_CHECK(hipMemRelease(retrieved));
+
+  HIP_CHECK(hipMemUnmap(ptr, size_mem));
+  HIP_CHECK(hipMemRelease(handle1));
+  HIP_CHECK(hipMemRelease(handle2));
+  HIP_CHECK(hipMemAddressFree(ptr, size_mem));
+}
+
+/**
  * End doxygen group VirtualMemoryManagementTest.
  * @}
  */
