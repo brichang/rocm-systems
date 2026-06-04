@@ -1533,11 +1533,11 @@ int Runtime::IPCClientImport(uint32_t conn_handle, uint64_t dmabuf_fd_handle,
         auto [it, inserted] = allocation_map_.try_emplace(
             *importAddress, nullptr, *importSize, *importSize, core::MemoryRegion::AllocateNoFlags);
         if (!inserted && it->second.thunk_bo) {
-          HSAKMT_CALL(hsaKmtMemHandleFree(it->second.thunk_bo));
+          HSAKMT_CALL(hsaKmtMemHandleFreePreserveMetadata(it->second.thunk_bo));
         }
         it->second.thunk_bo = res.buf_handle;
       } else {
-        HSAKMT_CALL(hsaKmtMemHandleFree(res.buf_handle));
+        HSAKMT_CALL(hsaKmtMemHandleFreePreserveMetadata(res.buf_handle));
       }
       runtime_singleton_->DmaBufClose(static_cast<int>(dmabuf_fd));
     }
@@ -1571,7 +1571,7 @@ hsa_status_t Runtime::IPCAttach(const hsa_amd_ipc_memory_t* handle, size_t len, 
     // a different thunk_bo, free the old one first to avoid leaking it.
     if (new_thunk_bo) {
       if (it->second.thunk_bo && it->second.thunk_bo != new_thunk_bo) {
-        HSAKMT_CALL(hsaKmtMemHandleFree(it->second.thunk_bo));
+        HSAKMT_CALL(hsaKmtMemHandleFreePreserveMetadata(it->second.thunk_bo));
       }
       it->second.thunk_bo = new_thunk_bo;
     }
