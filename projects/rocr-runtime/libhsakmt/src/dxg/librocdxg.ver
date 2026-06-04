@@ -103,6 +103,7 @@ hsaKmtHandleImport;
 hsaKmtMemoryVaMap;
 hsaKmtMemoryVaUnmap;
 hsaKmtMemHandleFree;
+hsaKmtMemHandleFreePreserveMetadata;
 hsaKmtMemoryGetCpuAddr;
 hsaKmtMemoryCpuMap;
 amdgpu_device_initialize;
