@@ -1033,7 +1033,16 @@ def test_import_does_not_apply_global_patches(monkeypatch):
         post = {
             "compile": getattr(_torch, "compile", None),
         }
-        assert hasattr(inject_roctx, "install_global_wraps")
+        for sym in (
+            "install_global_wraps",
+            "install_function_apply_wrappers",
+            "using_c_tier",
+            "dump_recordfn_stats",
+            "_push_scope",
+            "_pop_scope",
+            "resolve_user_caller_location",
+        ):
+            assert hasattr(inject_roctx, sym), f"public symbol missing: {sym}"
         assert post["compile"] is pre["compile"], "torch.compile was replaced on import"
     finally:
         sys.modules.pop("utils.inject_roctx", None)
