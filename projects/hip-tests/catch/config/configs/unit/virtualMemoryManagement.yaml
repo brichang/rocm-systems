@@ -225,6 +225,10 @@ virtualMemoryManagement:
   Unit_hipMemMap_Bookkeeping_CrossLinksWired: *level_2
   Unit_hipMemMap_Bookkeeping_MultiAliasCrossLinks: *level_2
   Unit_hipMemMap_Bookkeeping_MemObjMapInsertion: *level_2
+  Unit_hipMemMap_DirectPath_BasicMapUnmapRoundTrip: *level_2
+  Unit_hipMemMap_DirectPath_BackendFailureMapsToOutOfMemory: *level_2
+  Unit_hipMemMap_DirectPath_FailureReleasesGaRetain: *level_2
+  Unit_hipMemMap_DirectPath_NoImplicitSync: *level_2
   Unit_hipMemRelease_negative:
     <<: *level_2
     # Patch which removes the typetraits implementation from std namespace in hiprtc is reverted
@@ -237,6 +241,7 @@ virtualMemoryManagement:
   Unit_hipMemUnmap_Capture: *level_2
   Unit_hipMemUnmap_Bookkeeping_CrossLinksTornDown: *level_2
   Unit_hipMemUnmap_Bookkeeping_RemapRewiresCrossLinks: *level_2
+  Unit_hipMemUnmap_DirectPath_AbortsOnFirstError: *level_2
   Unit_hipMemMapArrayAsync_Positive_Basic:
     <<: *level_2
     tags: [image]

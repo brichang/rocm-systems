@@ -227,6 +227,37 @@ HIP_TEST_CASE(Unit_hipMemUnmap_Bookkeeping_RemapRewiresCrossLinks) {
 }
 
 /**
+ * Test Description
+ * ------------------------
+ *    - Direct-path TDD test for the sub-buffer loop's "abort on first
+ * error" contract in the new hipMemUnmap (Commit 5 of refactor). Per
+ * design: on Device::virtualUnmap returning false for any sub-buffer,
+ * the loop aborts immediately and returns hipErrorInvalidValue, and
+ * ga->release() is NOT called for the failing sub-buffer (release-only-
+ * on-success). We cannot directly synthesize a mid-range bad VA from a
+ * black-box test: hipMemUnmap rejects whole-range invalid input at
+ * ValidateSubBufferCoverage (hip_vm.cpp:433) before the sub-buffer
+ * loop is entered, so the abort-on-first-error path inside the loop
+ * itself isn't reachable via the public API without intentional state
+ * corruption. Skipping with a documented reason; will be re-enabled
+ * once Commit 5 lands and we can drive a failure through a test seam
+ * or via the device-driver returning an error on a partially-torn
+ * range.
+ * ------------------------
+ *    - unit/virtualMemoryManagement/hipMemUnmap.cc
+ * Test requirements
+ * ------------------------
+ *    - HIP_VERSION >= 6.1
+ */
+HIP_TEST_CASE(Unit_hipMemUnmap_DirectPath_AbortsOnFirstError) {
+  HIP_SKIP_TEST(
+      "Cannot reach the sub-buffer loop's abort-on-first-error branch "
+      "from a black-box test -- ValidateSubBufferCoverage rejects bad "
+      "input before the loop runs. Re-enable after Commit 5's failure-"
+      "injection seam exists.");
+}
+
+/**
  * End doxygen group VirtualMemoryManagementTest.
  * @}
  */

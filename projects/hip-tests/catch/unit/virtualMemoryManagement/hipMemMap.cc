@@ -947,6 +947,199 @@ HIP_TEST_CASE(Unit_hipMemMap_Bookkeeping_MemObjMapInsertion) {
 }
 
 /**
+ * Test Description
+ * ------------------------
+ *    - Direct-path TDD test for the new Device::virtualMap pure virtual
+ * (Commit 4 of hipMemMap refactor). End-to-end lifecycle: reserve VA,
+ * create physical handle, hipMemMap, set access, write through HtoD,
+ * read back via DtoH and a kernel, verify, hipMemUnmap, release, free.
+ * Pins data integrity through the new direct path. Today this exercises
+ * the old VirtualMapCommand path and is expected to PASS — once Commit 4
+ * lands and hipMemMap routes through Device::virtualMap directly, the
+ * test must continue to pass (behavioral equivalence guard).
+ * ------------------------
+ *    - unit/virtualMemoryManagement/hipMemMap.cc
+ * Test requirements
+ * ------------------------
+ *    - HIP_VERSION >= 6.1
+ */
+HIP_TEST_CASE(Unit_hipMemMap_DirectPath_BasicMapUnmapRoundTrip) {
+  HIP_CHECK(hipFree(0));
+  size_t granularity = 0;
+  size_t buffer_size = N * sizeof(int);
+  int deviceId = 0;
+  hipDevice_t device;
+  HIP_CHECK(hipDeviceGet(&device, deviceId));
+  checkVMMSupported(device);
+  hipMemAllocationProp prop{};
+  prop.type = hipMemAllocationTypePinned;
+  prop.location.type = hipMemLocationTypeDevice;
+  prop.location.id = device;
+  HIP_CHECK(
+      hipMemGetAllocationGranularity(&granularity, &prop, hipMemAllocationGranularityMinimum));
+  REQUIRE(granularity > 0);
+  size_t size_mem = ((granularity + buffer_size - 1) / granularity) * granularity;
+
+  std::vector<int> A_h(N), B_h(N), C_h(N);
+  for (size_t idx = 0; idx < N; ++idx) {
+    A_h[idx] = static_cast<int>(idx);
+    C_h[idx] = static_cast<int>(idx * idx);
+  }
+
+  hipMemGenericAllocationHandle_t handle;
+  void* ptr = nullptr;
+  HIP_CHECK(hipMemCreate(&handle, size_mem, &prop, 0));
+  HIP_CHECK(hipMemAddressReserve(&ptr, size_mem, 0, 0, 0));
+
+  // The direct path under test.
+  HIP_CHECK(hipMemMap(ptr, size_mem, 0, handle, 0));
+
+  hipMemAccessDesc accessDesc{};
+  accessDesc.location.type = hipMemLocationTypeDevice;
+  accessDesc.location.id = device;
+  accessDesc.flags = hipMemAccessFlagsProtReadWrite;
+  HIP_CHECK(hipMemSetAccess(ptr, size_mem, &accessDesc, 1));
+
+  // Data integrity: HtoD then DtoH must round-trip.
+  std::fill(B_h.begin(), B_h.end(), initializer);
+  HIP_CHECK(hipMemcpyHtoD(reinterpret_cast<hipDeviceptr_t>(ptr), A_h.data(), buffer_size));
+  HIP_CHECK(hipMemcpyDtoH(B_h.data(), reinterpret_cast<hipDeviceptr_t>(ptr), buffer_size));
+  REQUIRE(std::equal(B_h.begin(), B_h.end(), A_h.data()));
+
+  // Kernel write through the mapped VA must be visible to host.
+  square_kernel<<<dim3(N / threadsPerBlk), dim3(threadsPerBlk), 0, 0>>>(
+      reinterpret_cast<int*>(ptr));
+  HIP_CHECK(hipStreamSynchronize(0));
+  HIP_CHECK(hipMemcpyDtoH(B_h.data(), reinterpret_cast<hipDeviceptr_t>(ptr), buffer_size));
+  REQUIRE(std::equal(B_h.begin(), B_h.end(), C_h.data()));
+
+  // Bookkeeping cross-link must be wired by the direct path (lean on the
+  // dedicated bookkeeping tests for finer-grained assertions).
+  hipMemGenericAllocationHandle_t retrieved = nullptr;
+  HIP_CHECK(hipMemRetainAllocationHandle(&retrieved, ptr));
+  REQUIRE(retrieved == handle);
+  HIP_CHECK(hipMemRelease(retrieved));
+
+  HIP_CHECK(hipMemUnmap(ptr, size_mem));
+  HIP_CHECK(hipMemRelease(handle));
+  HIP_CHECK(hipMemAddressFree(ptr, size_mem));
+}
+
+/**
+ * Test Description
+ * ------------------------
+ *    - Direct-path TDD test for the new Device::virtualMap error
+ * translation contract: when the device-level virtualMap returns false,
+ * the HIP layer must surface hipErrorOutOfMemory (per design
+ * "false -> hipErrorOutOfMemory") AND must call ga->release() so the
+ * physical handle is not leaked on failure. We cannot force the HSA
+ * backend to fail from a black-box test reliably -- exhausting device
+ * memory is fragile across SKUs, and the HIP API rejects unaligned VAs
+ * at parameter validation (hip_vm.cpp:277) before they ever reach
+ * virtualMap. Skipping with a documented reason rather than faking
+ * the assertion. Will be re-enabled once Commit 4 lands and we can
+ * inject failure via a test-only seam (or via SetMemAccess on a
+ * subsequently-released handle).
+ * ------------------------
+ *    - unit/virtualMemoryManagement/hipMemMap.cc
+ * Test requirements
+ * ------------------------
+ *    - HIP_VERSION >= 6.1
+ */
+HIP_TEST_CASE(Unit_hipMemMap_DirectPath_BackendFailureMapsToOutOfMemory) {
+  HIP_SKIP_TEST(
+      "Cannot reliably force Device::virtualMap to return false from a "
+      "black-box test (HIP API parameter validation guards alignment; "
+      "device-OOM is fragile). Re-enable after Commit 4 introduces a "
+      "test-only failure-injection seam.");
+}
+
+/**
+ * Test Description
+ * ------------------------
+ *    - Direct-path TDD test pinning the ga lifecycle on map failure.
+ * Per design: on virtualMap false, the HIP layer must call ga->release()
+ * so the retain bumped at the start of hipMemMap is rolled back; the
+ * user can then still call hipMemRelease without dangling refs. Same
+ * black-box limitation as BackendFailureMapsToOutOfMemory -- we have no
+ * reliable way to force virtualMap to return false today. Skipping with
+ * a documented reason rather than emitting a fake pass.
+ * ------------------------
+ *    - unit/virtualMemoryManagement/hipMemMap.cc
+ * Test requirements
+ * ------------------------
+ *    - HIP_VERSION >= 6.1
+ */
+HIP_TEST_CASE(Unit_hipMemMap_DirectPath_FailureReleasesGaRetain) {
+  HIP_SKIP_TEST(
+      "Depends on reliably triggering a virtualMap failure -- not "
+      "achievable from a black-box test. Re-enable once Commit 4's "
+      "failure-injection seam exists.");
+}
+
+/**
+ * Test Description
+ * ------------------------
+ *    - Direct-path TDD test for the "no implicit sync on map" contract
+ * (per design "It is the user's responsibility to ensure no work is
+ * using the pointer prior to hipMemMap returning"). The new direct
+ * path must NOT call SyncAllStreams. With no in-flight work, hipMemMap
+ * should complete well under a generous bound. Today this exercises the
+ * old VirtualMapCommand path (which already does not call
+ * SyncAllStreams), so the test is expected to PASS now and continue to
+ * pass after Commit 4. A failure here would catch a regression where
+ * the direct path accidentally added a sync. Note: this is a weak
+ * positive assertion -- it cannot prove the absence of SyncAllStreams,
+ * only flag gross slowdowns. The 500 ms ceiling is intentionally loose
+ * to avoid flakes on shared CI.
+ * ------------------------
+ *    - unit/virtualMemoryManagement/hipMemMap.cc
+ * Test requirements
+ * ------------------------
+ *    - HIP_VERSION >= 6.1
+ */
+HIP_TEST_CASE(Unit_hipMemMap_DirectPath_NoImplicitSync) {
+  HIP_CHECK(hipFree(0));
+  size_t granularity = 0;
+  size_t buffer_size = N * sizeof(int);
+  int deviceId = 0;
+  hipDevice_t device;
+  HIP_CHECK(hipDeviceGet(&device, deviceId));
+  checkVMMSupported(device);
+  hipMemAllocationProp prop{};
+  prop.type = hipMemAllocationTypePinned;
+  prop.location.type = hipMemLocationTypeDevice;
+  prop.location.id = device;
+  HIP_CHECK(
+      hipMemGetAllocationGranularity(&granularity, &prop, hipMemAllocationGranularityMinimum));
+  REQUIRE(granularity > 0);
+  size_t size_mem = ((granularity + buffer_size - 1) / granularity) * granularity;
+
+  hipMemGenericAllocationHandle_t handle;
+  void* ptr = nullptr;
+  HIP_CHECK(hipMemCreate(&handle, size_mem, &prop, 0));
+  HIP_CHECK(hipMemAddressReserve(&ptr, size_mem, 0, 0, 0));
+
+  // Make sure no work is in flight on the NullStream before timing.
+  HIP_CHECK(hipDeviceSynchronize());
+
+  auto t0 = std::chrono::steady_clock::now();
+  HIP_CHECK(hipMemMap(ptr, size_mem, 0, handle, 0));
+  auto t1 = std::chrono::steady_clock::now();
+
+  const auto elapsed_ms =
+      std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+  // Loose upper bound: 500 ms. A hipMemMap that secretly drained every
+  // stream on every device would exceed this on any non-trivial system.
+  // Tightening this later is fine once we have a known-good baseline.
+  REQUIRE(elapsed_ms < 500);
+
+  HIP_CHECK(hipMemUnmap(ptr, size_mem));
+  HIP_CHECK(hipMemRelease(handle));
+  HIP_CHECK(hipMemAddressFree(ptr, size_mem));
+}
+
+/**
  * End doxygen group VirtualMemoryManagementTest.
  * @}
  */
