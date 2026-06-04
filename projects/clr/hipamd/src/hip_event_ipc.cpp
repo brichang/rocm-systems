@@ -289,6 +289,17 @@ hipError_t IPCEvent::recordCommand(amd::Command*& command, amd::HostQueue* strea
 
 // ================================================================================================
 hipError_t IPCEvent::enqueueRecordCommand(hip::Stream* stream, amd::Command* command) {
+  // A single shared IPC signal cannot represent overlapping recordings, and the
+  // consumer is attached to this exact signal (it cannot be rotated). So we must
+  // serialize re-recordings: wait for the previous record's GPU work to drain
+  // before re-arming, otherwise the absolute Reset(1) races with the prior
+  // barrier's pending decrement and a waiter can wake on the wrong recording.
+  // Skip the wait on the first record (signal still at its initial value, never
+  // decremented) — waiting there would hang forever.
+  if (event_ != nullptr) {
+    ipc_signal_->Wait(1, amd::device::Signal::Condition::Lt, UINT64_MAX);
+  }
+
   // Re-arm the signal; GPU barrier will decrement to 0 when work completes
   ipc_signal_->Reset(1);
 
