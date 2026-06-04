@@ -19,8 +19,10 @@
 # IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 # CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
+import logging
 import sys
 import time
+from pathlib import Path
 
 from amdsmi_cli_exceptions import AmdSmiInvalidCommandException
 
@@ -33,7 +35,6 @@ class RasCommands:
         gpu=None,
         cper=None,
         afid=None,
-        decode=None,
         severity=None,
         folder=None,
         file_limit=None,
@@ -58,8 +59,6 @@ class RasCommands:
             args.cper = cper
         if afid:
             args.afid = afid
-        if decode:
-            args.decode = decode
         if severity:
             args.severity = severity
         if folder:
@@ -74,6 +73,15 @@ class RasCommands:
             args.gpu = self.device_handles
 
         if args.afid:
+            command = " ".join(sys.argv[1:])
+            # Require exactly one of --cper-file / --folder under --afid.
+            if bool(args.cper_file) == bool(args.folder):
+                message = (
+                    f"Command '{command}' requires exactly one of"
+                    " '--cper-file' or '--folder'. Run '--help' for more info."
+                )
+                raise AmdSmiInvalidCommandException(command, self.logger.format, message)
+
             if args.cper_file:
                 afids = self.helpers.cper_dump_afids(args.cper_file)
                 if self.logger.is_json_format():
@@ -83,10 +91,48 @@ class RasCommands:
                 else:
                     print(" ".join(map(str, afids)))
                 return
-            else:
-                command = " ".join(sys.argv[1:])
-                message = f"Command '{command}' requires '--cper-file'. Run '--help' for more info."
+
+            # --afid --folder: read-only path, folder must already exist.
+            folder = Path(args.folder)
+            if not folder.exists() or not folder.is_dir():
+                message = (
+                    f"Folder '{folder}' does not exist or is not a directory."
+                    " '--afid --folder' requires a folder of pre-existing CPER records."
+                )
                 raise AmdSmiInvalidCommandException(command, self.logger.format, message)
+            cper_paths = sorted(folder.glob("*.cper"))
+            if not cper_paths:
+                message = (
+                    f"Folder '{folder}' contains no '.cper' files."
+                    " '--afid --folder' requires a folder of pre-existing CPER records."
+                )
+                raise AmdSmiInvalidCommandException(command, self.logger.format, message)
+
+            results = []
+            for cper_path in cper_paths:
+                # Skip symlinks: a planted symlink (e.g. evil.cper -> /etc/shadow)
+                # would otherwise be followed by read_bytes() in cper_dump_afids,
+                # reading arbitrary files into memory.
+                if cper_path.is_symlink():
+                    logging.warning("Skipping symlink: %s", cper_path)
+                    continue
+                try:
+                    afids = self.helpers.cper_dump_afids(cper_path)
+                except Exception as e:
+                    logging.debug("Failed to decode AFIDs from %s: %s", cper_path, e)
+                    afids = []
+                results.append({"cper_file": str(cper_path), "afids": afids})
+
+            if self.logger.is_json_format():
+                self.logger.output = results
+                self.logger.print_output()
+            else:
+                print(f"{'file_name':<32} list of afids")
+                for entry in results:
+                    fname = Path(entry["cper_file"]).name
+                    afids_str = " ".join(map(str, entry["afids"]))
+                    print(f"{fname:<32} {afids_str}")
+            return
 
         if not self.group_check_printed:
             self.helpers.check_required_groups()
@@ -126,20 +172,46 @@ class RasCommands:
                 f"GPU{gpu_id}" for gpu_id in primary_partition_gpu_ids
             )
 
-            print("WARNING: CPER files are only available on primary partitions")
+            self.helpers.cper_print(
+                "WARNING: CPER files are only available on primary partitions", self.logger
+            )
             if len(primary_partition_gpu_ids) > 1:
-                print(f"Try with primary partitions {primary_partitions_str}", end="")
+                self.helpers.cper_print(
+                    f"Try with primary partitions {primary_partitions_str}", self.logger
+                )
             else:
-                print(f"Try with primary partition {primary_partitions_str}", end="")
+                self.helpers.cper_print(
+                    f"Try with primary partition {primary_partitions_str}", self.logger
+                )
 
-            print()
+        # One-shot warning, header, and follow prompt (kept out of the per-GPU helper
+        # so the helper layer stays re-entrant and free of latching state).
+        if not self.logger.is_json_format():
+            if not args.folder:
+                self.helpers.cper_print(
+                    "WARNING: No CPER files will be dumped unless "
+                    "--folder=<folder_name> is specified and cper entries exist.",
+                    self.logger,
+                )
+            self.helpers._print_header(args.folder, self.logger)
+            if args.follow:
+                # Always print to stdout so the user sees the prompt, even with --file.
+                print("Press CTRL + C to stop.")
 
+        # Shared 1-indexed counter for generated CPER filenames across all GPUs
+        # and follow iterations within this invocation.
+        cper_counter = [0]
         is_json = self.logger.is_json_format()
         while True:
             all_json_rows = []
             for idx, device_handle in enumerate(args.gpu):
                 rows = self.helpers.ras_cper(
-                    args, device_handle, self.logger, idx, emit_json=not is_json
+                    args,
+                    device_handle,
+                    self.logger,
+                    idx,
+                    emit_json=not is_json,
+                    cper_counter=cper_counter,
                 )
                 all_json_rows.extend(rows)
             if is_json and all_json_rows:
