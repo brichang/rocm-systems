@@ -28,6 +28,7 @@
 #include <hsa/amd_hsa_signal.h>
 #include <hsa/hsa.h>
 
+#include <atomic>
 #include <chrono>
 #include <future>
 #include <memory>
@@ -354,6 +355,63 @@ TEST(queue_interposition, doorbell_backpressure_waits_when_ring_full_k0)
     EXPECT_EQ(doorbell_value, 4);
     EXPECT_LE(state->next_submit_pos - real_rdid, state->ring_size);
     EXPECT_EQ(get_pkt(ring, 4, 3)->kernel_object, static_cast<uint64_t>(0xABCD));
+}
+
+TEST(queue_interposition, doorbell_out_of_order_does_not_hang)
+{
+    auto             state = std::make_shared<QueueState>();
+    alignas(64) char ring[64 * 256];
+    memset(ring, 0, sizeof(ring));
+    uint64_t real_wdid = 0;
+    uint64_t real_rdid = 0;
+
+    state->ring_buf  = ring;
+    state->ring_size = 256;
+    state->ring_mask = 255;
+    state->real_wdid = &real_wdid;
+    state->real_rdid = &real_rdid;
+    state->virtual_wptr.store(2);
+
+    auto set_header = [&](uint64_t idx, uint16_t type) {
+        auto* pkt = get_pkt(ring, idx, 255);
+        __atomic_store_n(&pkt->header, type, __ATOMIC_RELEASE);
+    };
+
+    set_header(0, static_cast<uint16_t>(HSA_PACKET_TYPE_INVALID << HSA_PACKET_HEADER_TYPE));
+    get_pkt(ring, 1, 255)->kernel_object = 0xB1;
+    set_header(1, static_cast<uint16_t>(HSA_PACKET_TYPE_KERNEL_DISPATCH << HSA_PACKET_HEADER_TYPE));
+
+    std::atomic<bool> done{false};
+    std::thread       worker([&]() {
+        process_doorbell_impl(state, 1, [](hsa_signal_t, hsa_signal_value_t) {});
+        done.store(true, std::memory_order_release);
+    });
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{3};
+    while(!done.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds{1});
+
+    const bool hung = !done.load(std::memory_order_acquire);
+    if(hung)
+    {
+        set_header(
+            0, static_cast<uint16_t>(HSA_PACKET_TYPE_KERNEL_DISPATCH << HSA_PACKET_HEADER_TYPE));
+    }
+    worker.join();
+    ASSERT_FALSE(hung) << "process_doorbell_impl hung waiting on an uncommitted earlier slot "
+                          "after an out-of-order doorbell ring";
+
+    EXPECT_EQ(state->next_scan_pos, 0u);
+    EXPECT_EQ(real_wdid, 0u);
+
+    get_pkt(ring, 0, 255)->kernel_object = 0xB0;
+    set_header(0, static_cast<uint16_t>(HSA_PACKET_TYPE_KERNEL_DISPATCH << HSA_PACKET_HEADER_TYPE));
+
+    process_doorbell_impl(state, 0, [](hsa_signal_t, hsa_signal_value_t) {});
+    EXPECT_EQ(real_wdid, 2u);
+    EXPECT_EQ(state->next_scan_pos, 2u);
+    EXPECT_EQ(get_pkt(ring, 0, 255)->kernel_object, static_cast<uint64_t>(0xB0));
+    EXPECT_EQ(get_pkt(ring, 1, 255)->kernel_object, static_cast<uint64_t>(0xB1));
 }
 }  // namespace
 }  // namespace queue_interposition

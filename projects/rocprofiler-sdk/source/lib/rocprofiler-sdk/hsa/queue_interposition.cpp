@@ -705,77 +705,50 @@ process_doorbell_impl(const queue_state_ptr_t& state,
 
     const uint64_t scan_pos = state_ptr->next_scan_pos;
 
-    // The doorbell value is the index of the *last* packet the ringing thread has committed
-    // (header written with release).  We must NOT use virtual_wptr here: HIP graph dispatch
-    // (CLR's dispatchAqlPacketBatchFlat) does a single add_write_index for the entire batch
-    // (e.g. 2000 packets) and then commits headers + rings the doorbell in much smaller
-    // chunks (DEBUG_HIP_GRAPH_BATCH_SIZE).  Between chunks, virtual_wptr already covers all
-    // reserved slots but only the slots up to `value` have valid headers; the rest still hold
-    // INVALID and the header-wait spin below would deadlock on them.
-    //
-    // virtual_wptr serves only as a defensive upper bound in case value+1 somehow lags.
-    const uint64_t doorbell_end = static_cast<uint64_t>(value) + 1;
-    const uint64_t wptr_end     = state_ptr->virtual_wptr.load(std::memory_order_acquire);
-    const uint64_t scan_end     = (doorbell_end < wptr_end) ? doorbell_end : wptr_end;
+    const uint64_t wptr_end = state_ptr->virtual_wptr.load(std::memory_order_acquire);
 
-    if(scan_pos >= scan_end)
+    if(scan_pos >= wptr_end)
     {
         ring_doorbell(state_ptr->doorbell_signal, value);
         return;
     }
 
-    const uint64_t pkt_count = scan_end - scan_pos;
+    static thread_local auto snapshot_storage = std::vector<char>{};
+    const uint64_t           max_bytes        = (wptr_end - scan_pos) * state_ptr->pkt_size;
+    if(snapshot_storage.size() < max_bytes) snapshot_storage.resize(max_bytes);
+    char* const source_snapshot = snapshot_storage.data();
+
+    uint64_t drained = 0;
+    for(uint64_t pos = scan_pos; pos < wptr_end; ++pos)
+    {
+        const auto  ring_slot = pos & state_ptr->ring_mask;
+        char* const slot_base =
+            static_cast<char*>(state_ptr->ring_buf) + (ring_slot * state_ptr->pkt_size);
+        auto* const hdr_ptr = reinterpret_cast<volatile uint16_t*>(slot_base);
+
+        if((__atomic_load_n(hdr_ptr, __ATOMIC_ACQUIRE) & 0xFFu) ==
+           static_cast<unsigned>(HSA_PACKET_TYPE_INVALID))
+            break;
+
+        ::memcpy(source_snapshot + (drained * state_ptr->pkt_size), slot_base, state_ptr->pkt_size);
+        __atomic_store_n(hdr_ptr, static_cast<uint16_t>(HSA_PACKET_TYPE_INVALID), __ATOMIC_RELEASE);
+        ++drained;
+    }
+
+    if(drained == 0)
+    {
+        ring_doorbell(state_ptr->doorbell_signal, value);
+        return;
+    }
+
+    const uint64_t pkt_count = drained;
+    const uint64_t scan_end  = scan_pos + drained;
 
     ROCP_INFO << fmt::format("{} :: pkt_count={} (scan_pos={}, scan_end={})",
                              __FUNCTION__,
                              pkt_count,
                              scan_pos,
                              scan_end);
-
-    // Snapshot each slot, but wait for its header to be committed first.
-    //
-    // The AQL specification requires packet writers to store the header field *last* using
-    // release semantics (ROCR enforces this in amd_aql_queue.cpp).  An acquire load of the
-    // header here pairs with that release store and ensures the complete packet body is
-    // visible before we copy it.
-    //
-    // The type field occupies bits [7:0] of the 16-bit header.  While the slot is "empty"
-    // (not yet written by the current generation's producer) the type equals
-    // HSA_PACKET_TYPE_INVALID (== 1):
-    //   - On queue creation ROCR initialises every slot to INVALID.
-    //   - After we snapshot a slot we reset its header back to INVALID (see below) so that
-    //     wrap-around reuse of the same ring slot is detectable for subsequent generations.
-    //
-    // Without this wait the interceptor can copy stale/unwritten data into the GPU ring,
-    // causing the GPU's Command Processor to process garbage packets.  The application thread
-    // that owns the slot cannot write to it until we release gate_lock (it needs no lock to
-    // write the body) so this spin terminates once the writer completes its memcpy + header
-    // store, with no risk of deadlock.
-    // Reused per-thread buffer (grows only) to avoid a heap allocation on every doorbell.
-    static thread_local auto snapshot_storage = std::vector<char>{};
-    const uint64_t           snapshot_bytes   = pkt_count * state_ptr->pkt_size;
-    if(snapshot_storage.size() < snapshot_bytes) snapshot_storage.resize(snapshot_bytes);
-    char* const source_snapshot = snapshot_storage.data();
-
-    for(uint64_t i = 0; i < pkt_count; ++i)
-    {
-        const auto  ring_slot = (scan_pos + i) & state_ptr->ring_mask;
-        char* const slot_base =
-            static_cast<char*>(state_ptr->ring_buf) + (ring_slot * state_ptr->pkt_size);
-        auto* const hdr_ptr = reinterpret_cast<volatile uint16_t*>(slot_base);
-
-        // Spin until the producer commits the header (type field != INVALID).
-        while((__atomic_load_n(hdr_ptr, __ATOMIC_ACQUIRE) & 0xFFu) ==
-              static_cast<unsigned>(HSA_PACKET_TYPE_INVALID))
-        {
-            cpu_relax();
-        }
-
-        ::memcpy(source_snapshot + (i * state_ptr->pkt_size), slot_base, state_ptr->pkt_size);
-
-        // Reset the header to INVALID so the next ring-buffer generation can be detected.
-        __atomic_store_n(hdr_ptr, static_cast<uint16_t>(HSA_PACKET_TYPE_INVALID), __ATOMIC_RELEASE);
-    }
 
     auto& tls                     = get_doorbell_tls();
     tls.state                     = state_ptr;
