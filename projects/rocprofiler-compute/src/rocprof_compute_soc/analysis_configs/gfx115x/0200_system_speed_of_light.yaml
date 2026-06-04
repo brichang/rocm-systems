@@ -33,7 +33,7 @@ Panel Config:
           peak: ($max_waves_per_cu * $cu_per_gpu)
           pop: true
         GL2 Cache Hit Rate:
-          value: SUM(100 * GL2C_HIT_sum) / SUM(GL2C_HIT_sum + GL2C_MISS_sum)
+          value: 100 * SUM(GL2C_HIT_sum) / SUM(GL2C_HIT_sum + GL2C_MISS_sum)
           unit: Percent
           peak: 100
           pop: false
@@ -64,7 +64,7 @@ Panel Config:
           peak: 100
           pop: false
         GL0 Cache Hit Rate (TCP Cache):
-          value: SUM(100 * (TCP_REQ_sum - TCP_REQ_MISS_sum)) / SUM(TCP_REQ_sum)
+          value: 100 * SUM(NOISE_CLAMP(TCP_REQ_sum - TCP_REQ_MISS_sum, TCP_REQ_sum)) / SUM(TCP_REQ_sum)
           unit: Percent
           peak: 100
           pop: false
@@ -74,7 +74,7 @@ Panel Config:
           peak: ($cu_per_gpu * 128 * $max_sclk * 1e6)
           pop: true
         GL1 Cache Hit Rate:
-          value: SUM(100 * (GL1C_REQ_sum - GL1C_REQ_MISS_sum)) / SUM(GL1C_REQ_sum)
+          value: 100 * SUM(NOISE_CLAMP(GL1C_REQ_sum - GL1C_REQ_MISS_sum, GL1C_REQ_sum)) / SUM(GL1C_REQ_sum)
           unit: Percent
           peak: 100
           pop: false
@@ -89,7 +89,7 @@ Panel Config:
           peak: ($total_l2_chan * 128 * $max_sclk * 1e6)
           pop: true
         Scalar Data Cache Hit Rate:
-          value: SUM(100 * SQC_DCACHE_HITS_sum) / SUM(SQC_DCACHE_HITS_sum + SQC_DCACHE_MISSES_sum)
+          value: 100 * SUM(SQC_DCACHE_HITS_sum) / SUM(SQC_DCACHE_HITS_sum + SQC_DCACHE_MISSES_sum)
           unit: Percent
           peak: 100
           pop: false
@@ -99,7 +99,7 @@ Panel Config:
           peak: ($sqc_per_gpu * 64 * $max_sclk * 1e6)
           pop: true
         Instruction Cache Hit Rate:
-          value: SUM(100 * SQC_ICACHE_HITS_sum) / SUM(SQC_ICACHE_HITS_sum + SQC_ICACHE_MISSES_sum)
+          value: 100 * SUM(SQC_ICACHE_HITS_sum) / SUM(SQC_ICACHE_HITS_sum + SQC_ICACHE_MISSES_sum)
           unit: Percent
           peak: 100
           pop: false

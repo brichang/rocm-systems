@@ -15,7 +15,7 @@ Panel Config:
           value: SUM(SQC_DCACHE_REQ * 100000) / SUM($max_sclk * $sqc_per_gpu * (End_Timestamp - Start_Timestamp))
           unit: Percent
         Cache Hit Rate:
-          value: SUM(SQC_DCACHE_HITS * 100) / SUM(SQC_DCACHE_HITS + SQC_DCACHE_MISSES + SQC_DCACHE_MISSES_DUPLICATE)
+          value: 100 * SUM(SQC_DCACHE_HITS) / SUM(SQC_DCACHE_HITS + SQC_DCACHE_MISSES + SQC_DCACHE_MISSES_DUPLICATE)
           unit: Percent
         sL1D-L2 BW Utilization:
           value: SUM((SQC_TC_DATA_READ_REQ + SQC_TC_DATA_WRITE_REQ + SQC_TC_DATA_ATOMIC_REQ) * 100000) / SUM(2 * $max_sclk * $sqc_per_gpu * (End_Timestamp - Start_Timestamp))
@@ -54,7 +54,7 @@ Panel Config:
           max: MAX((SQC_DCACHE_MISSES_DUPLICATE / $denom))
           unit: (Requests + $normUnit)
         Cache Hit Rate:
-          avg: SUM(100 * SQC_DCACHE_HITS) / SUM(SQC_DCACHE_HITS + SQC_DCACHE_MISSES + SQC_DCACHE_MISSES_DUPLICATE)
+          avg: 100 * SUM(SQC_DCACHE_HITS) / SUM(SQC_DCACHE_HITS + SQC_DCACHE_MISSES + SQC_DCACHE_MISSES_DUPLICATE)
           min: MIN(100 * SQC_DCACHE_HITS / (SQC_DCACHE_HITS + SQC_DCACHE_MISSES + SQC_DCACHE_MISSES_DUPLICATE))
           max: MAX(100 * SQC_DCACHE_HITS / (SQC_DCACHE_HITS + SQC_DCACHE_MISSES + SQC_DCACHE_MISSES_DUPLICATE))
           unit: Percent

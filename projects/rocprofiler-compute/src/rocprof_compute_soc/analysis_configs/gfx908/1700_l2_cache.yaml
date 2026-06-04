@@ -53,9 +53,9 @@ Panel Config:
           max: MAX(100 * TCC_EA0_RDREQ_DRAM_sum / TCC_EA0_RDREQ_sum)
           unit: Percent
         Remote Read Traffic:
-          avg: SUM(100 * (TCC_EA0_RDREQ_sum - TCC_EA0_RDREQ_DRAM_sum)) / SUM(TCC_EA0_RDREQ_sum)
-          min: MIN(100 * (TCC_EA0_RDREQ_sum - TCC_EA0_RDREQ_DRAM_sum) / TCC_EA0_RDREQ_sum)
-          max: MAX(100 * (TCC_EA0_RDREQ_sum - TCC_EA0_RDREQ_DRAM_sum) / TCC_EA0_RDREQ_sum)
+          avg: SUM(100 * NOISE_CLAMP(TCC_EA0_RDREQ_sum - TCC_EA0_RDREQ_DRAM_sum, TCC_EA0_RDREQ_sum)) / SUM(TCC_EA0_RDREQ_sum)
+          min: MIN(100 * NOISE_CLAMP(TCC_EA0_RDREQ_sum - TCC_EA0_RDREQ_DRAM_sum, TCC_EA0_RDREQ_sum) / TCC_EA0_RDREQ_sum)
+          max: MAX(100 * NOISE_CLAMP(TCC_EA0_RDREQ_sum - TCC_EA0_RDREQ_DRAM_sum, TCC_EA0_RDREQ_sum) / TCC_EA0_RDREQ_sum)
           unit: Percent
         Uncached Read Traffic:
           avg: SUM(100 * TCC_EA0_RD_UNCACHED_32B_sum) / SUM(TCC_EA0_RDREQ_sum)
@@ -75,9 +75,9 @@ Panel Config:
           max: MAX(100 * TCC_EA0_WRREQ_DRAM_sum / TCC_EA0_WRREQ_sum)
           unit: Percent
         Remote Write and Atomic Traffic:
-          avg: SUM(100 * (TCC_EA0_WRREQ_sum - TCC_EA0_WRREQ_DRAM_sum)) / SUM(TCC_EA0_WRREQ_sum)
-          min: MIN(100 * (TCC_EA0_WRREQ_sum - TCC_EA0_WRREQ_DRAM_sum) / TCC_EA0_WRREQ_sum)
-          max: MAX(100 * (TCC_EA0_WRREQ_sum - TCC_EA0_WRREQ_DRAM_sum) / TCC_EA0_WRREQ_sum)
+          avg: SUM(100 * NOISE_CLAMP(TCC_EA0_WRREQ_sum - TCC_EA0_WRREQ_DRAM_sum, TCC_EA0_WRREQ_sum)) / SUM(TCC_EA0_WRREQ_sum)
+          min: MIN(100 * NOISE_CLAMP(TCC_EA0_WRREQ_sum - TCC_EA0_WRREQ_DRAM_sum, TCC_EA0_WRREQ_sum) / TCC_EA0_WRREQ_sum)
+          max: MAX(100 * NOISE_CLAMP(TCC_EA0_WRREQ_sum - TCC_EA0_WRREQ_DRAM_sum, TCC_EA0_WRREQ_sum) / TCC_EA0_WRREQ_sum)
           unit: Percent
         Atomic Traffic:
           avg: SUM(100 * TCC_EA0_ATOMIC_sum) / SUM(TCC_EA0_WRREQ_sum)
@@ -256,9 +256,9 @@ Panel Config:
           max: MAX((TCC_EA0_RDREQ_32B_sum / $denom))
           unit: (Req + $normUnit)
         Read (64B):
-          avg: SUM(TCC_EA0_RDREQ_sum - TCC_EA0_RDREQ_32B_sum) / SUM($denom)
-          min: MIN(((TCC_EA0_RDREQ_sum - TCC_EA0_RDREQ_32B_sum) / $denom))
-          max: MAX(((TCC_EA0_RDREQ_sum - TCC_EA0_RDREQ_32B_sum) / $denom))
+          avg: SUM(NOISE_CLAMP(TCC_EA0_RDREQ_sum - TCC_EA0_RDREQ_32B_sum, TCC_EA0_RDREQ_sum)) / SUM($denom)
+          min: MIN((NOISE_CLAMP(TCC_EA0_RDREQ_sum - TCC_EA0_RDREQ_32B_sum, TCC_EA0_RDREQ_sum) / $denom))
+          max: MAX((NOISE_CLAMP(TCC_EA0_RDREQ_sum - TCC_EA0_RDREQ_32B_sum, TCC_EA0_RDREQ_sum) / $denom))
           unit: (Req + $normUnit)
         Read (Uncached):
           avg: SUM(TCC_EA0_RD_UNCACHED_32B_sum) / SUM($denom)

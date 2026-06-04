@@ -36,7 +36,7 @@ Panel Config:
           value: (SUM(TCP_TCP_TA_ADDR_STALL_CYCLES_sum) / SUM(TCP_GATE_EN2_sum)) * 100
           unit: Percent
         L1 Cache - TCP hit rate:
-          value: (SUM(TCP_TOTAL_CACHE_ACCESSES_sum - TCP_CACHE_MISS_sum) / SUM(TCP_TOTAL_CACHE_ACCESSES_sum)) * 100
+          value: (SUM(NOISE_CLAMP(TCP_TOTAL_CACHE_ACCESSES_sum - TCP_CACHE_MISS_sum, TCP_TOTAL_CACHE_ACCESSES_sum)) / SUM(TCP_TOTAL_CACHE_ACCESSES_sum)) * 100
           unit: Percent
         L1 Cache - TCP miss rate:
           value: (SUM(TCP_CACHE_MISS_sum) / SUM(TCP_TOTAL_CACHE_ACCESSES_sum)) * 100

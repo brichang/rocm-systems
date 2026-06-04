@@ -256,9 +256,9 @@ Panel Config:
           max: MAX((TCC_EA0_RDREQ_32B_sum / $denom))
           unit: (Req + $normUnit)
         Read (64B):
-          avg: SUM(TCC_EA0_RDREQ_sum - TCC_EA0_RDREQ_32B_sum) / SUM($denom)
-          min: MIN(((TCC_EA0_RDREQ_sum - TCC_EA0_RDREQ_32B_sum) / $denom))
-          max: MAX(((TCC_EA0_RDREQ_sum - TCC_EA0_RDREQ_32B_sum) / $denom))
+          avg: SUM(NOISE_CLAMP(TCC_EA0_RDREQ_sum - TCC_EA0_RDREQ_32B_sum, TCC_EA0_RDREQ_sum)) / SUM($denom)
+          min: MIN((NOISE_CLAMP(TCC_EA0_RDREQ_sum - TCC_EA0_RDREQ_32B_sum, TCC_EA0_RDREQ_sum) / $denom))
+          max: MAX((NOISE_CLAMP(TCC_EA0_RDREQ_sum - TCC_EA0_RDREQ_32B_sum, TCC_EA0_RDREQ_sum) / $denom))
           unit: (Req + $normUnit)
         Read (Uncached):
           avg: SUM(TCC_EA0_RD_UNCACHED_32B_sum) / SUM($denom)

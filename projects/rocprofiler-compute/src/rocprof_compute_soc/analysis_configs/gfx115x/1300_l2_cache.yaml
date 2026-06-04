@@ -23,7 +23,7 @@ Panel Config:
         unit: Unit
       metric:
         GL2 Cache Hit Rate:
-          avg: SUM(100 * GL2C_HIT_sum) / SUM(GL2C_HIT_sum + GL2C_MISS_sum)
+          avg: 100 * SUM(GL2C_HIT_sum) / SUM(GL2C_HIT_sum + GL2C_MISS_sum)
           min: MIN(100 * GL2C_HIT_sum / (GL2C_HIT_sum + GL2C_MISS_sum))
           max: MAX(100 * GL2C_HIT_sum / (GL2C_HIT_sum + GL2C_MISS_sum))
           unit: Percent

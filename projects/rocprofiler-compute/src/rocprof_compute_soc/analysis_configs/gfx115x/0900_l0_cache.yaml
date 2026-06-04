@@ -80,9 +80,9 @@ Panel Config:
         unit: Unit
       metric:
         Hit Rate:
-          avg: SUM(100 * (TCP_REQ_sum - TCP_REQ_MISS_sum)) / SUM(TCP_REQ_sum)
-          min: MIN(100 * (TCP_REQ_sum - TCP_REQ_MISS_sum) / TCP_REQ_sum)
-          max: MAX(100 * (TCP_REQ_sum - TCP_REQ_MISS_sum) / TCP_REQ_sum)
+          avg: SUM(100 * NOISE_CLAMP(TCP_REQ_sum - TCP_REQ_MISS_sum, TCP_REQ_sum)) / SUM(TCP_REQ_sum)
+          min: MIN(100 * NOISE_CLAMP(TCP_REQ_sum - TCP_REQ_MISS_sum, TCP_REQ_sum) / TCP_REQ_sum)
+          max: MAX(100 * NOISE_CLAMP(TCP_REQ_sum - TCP_REQ_MISS_sum, TCP_REQ_sum) / TCP_REQ_sum)
           unit: Percent
 
   # =========================================================================

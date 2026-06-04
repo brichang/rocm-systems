@@ -51,7 +51,7 @@ Panel Config:
           value: SUM(100 * SQC_ICACHE_BUSY_CYCLES_sum) / SUM(SQ_BUSY_CYCLES_sum)
           unit: Percent
         ICache Hit Rate:
-          value: SUM(100 * SQC_ICACHE_HITS_sum) / SUM(SQC_ICACHE_HITS_sum + SQC_ICACHE_MISSES_sum)
+          value: 100 * SUM(SQC_ICACHE_HITS_sum) / SUM(SQC_ICACHE_HITS_sum + SQC_ICACHE_MISSES_sum)
           unit: Percent
         ICache Miss Rate:
           value: SUM(100 * SQC_ICACHE_MISSES_sum) / SUM(SQC_ICACHE_HITS_sum + SQC_ICACHE_MISSES_sum)
@@ -121,7 +121,7 @@ Panel Config:
           value: SUM(TCP_REQ_MISS_sum) / SUM($denom)
           unit: (Requests + $normUnit)
         GL0 Cache Hit Rate (TCP Cache):
-          value: SUM(100 * (TCP_REQ_sum - TCP_REQ_MISS_sum)) / SUM(TCP_REQ_sum)
+          value: 100 * SUM(NOISE_CLAMP(TCP_REQ_sum - TCP_REQ_MISS_sum, TCP_REQ_sum)) / SUM(TCP_REQ_sum)
           unit: Percent
         GL0 Cache BW (TCP Cache):
           value: SUM(TCP_REQ_sum * 64) / SUM((End_Timestamp - Start_Timestamp) / 1e9)
@@ -218,7 +218,7 @@ Panel Config:
           value: SUM(GL1C_REQ_MISS_sum) / SUM($denom)
           unit: (Requests + $normUnit)
         GL1 Cache Hit Rate:
-          value: SUM(100 * (GL1C_REQ_sum - GL1C_REQ_MISS_sum)) / SUM(GL1C_REQ_sum)
+          value: 100 * SUM(NOISE_CLAMP(GL1C_REQ_sum - GL1C_REQ_MISS_sum, GL1C_REQ_sum)) / SUM(GL1C_REQ_sum)
           unit: Percent
         GL1 Cache Starve Rate:
           value: SUM(100 * GL1C_STARVE_sum) / SUM(GL1C_CYCLE_sum)
@@ -290,7 +290,7 @@ Panel Config:
           value: SUM(GL2C_ATOMIC_sum) / SUM($denom)
           unit: (Requests + $normUnit)
         GL2 Cache Hit Rate:
-          value: SUM(100 * GL2C_HIT_sum) / SUM(GL2C_HIT_sum + GL2C_MISS_sum)
+          value: 100 * SUM(GL2C_HIT_sum) / SUM(GL2C_HIT_sum + GL2C_MISS_sum)
           unit: Percent
         GL2 Cache Read BW:
           # 32/64/128 B read bins plus 96 B compressed reads; EA 96 B (GL2C_EA_RDREQ_96B) is fabric-side (see Speed-of-Light).
