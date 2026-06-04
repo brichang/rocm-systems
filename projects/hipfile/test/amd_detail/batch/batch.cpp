@@ -39,6 +39,7 @@ struct HipFileBatch : public HipFileUnopened {
     std::shared_ptr<StrictMock<MFile>>   default_mock_file;
     const hipFileHandle_t                file_handle{reinterpret_cast<void *>(0xDEADBEEF)};
     void *const                          buffer_pointer{reinterpret_cast<void *>(0x0BADF00D)};
+    int                                  cookie{};
 
     void SetUp() override
     {
@@ -55,6 +56,7 @@ struct HipFileBatch : public HipFileUnopened {
         io_params->fh                  = file_handle;
         io_params->mode                = hipFileBatch;
         io_params->opcode              = hipFileBatchRead;
+        io_params->cookie              = &cookie;
     }
 
     HipFileBatch()
@@ -67,14 +69,55 @@ TEST_F(HipFileBatch, CreateOperationRead)
 {
     io_params->opcode = hipFileBatchRead;
 
-    BatchOperation op = BatchOperation{std::move(io_params), default_mock_buffer, default_mock_file};
+    BatchOperation    op    = BatchOperation{std::move(io_params), default_mock_buffer, default_mock_file};
+    hipFileIOEvents_t event = op.event();
+
+    ASSERT_EQ(event.status, hipFileWaiting);
 }
 
 TEST_F(HipFileBatch, CreateOperationWrite)
 {
     io_params->opcode = hipFileBatchWrite;
 
+    BatchOperation    op    = BatchOperation{std::move(io_params), default_mock_buffer, default_mock_file};
+    hipFileIOEvents_t event = op.event();
+
+    ASSERT_EQ(event.status, hipFileWaiting);
+}
+
+TEST_F(HipFileBatch, MarkOperationPending)
+{
     BatchOperation op = BatchOperation{std::move(io_params), default_mock_buffer, default_mock_file};
+
+    op.markPending();
+    hipFileIOEvents_t event = op.event();
+
+    ASSERT_EQ(event.status, hipFilePending);
+}
+
+TEST_F(HipFileBatch, TryCancelWaitingOperationIsNoOp)
+{
+    BatchOperation op = BatchOperation{std::move(io_params), default_mock_buffer, default_mock_file};
+
+    op.tryCancel();
+    hipFileIOEvents_t event = op.event();
+
+    ASSERT_EQ(op.event().status, hipFileWaiting);
+    ASSERT_EQ(event.ret, 0u);
+    ASSERT_EQ(event.cookie, &cookie);
+}
+
+TEST_F(HipFileBatch, MarkPendingPendingOperationThrowsInvalidStateTransition)
+{
+    BatchOperation op = BatchOperation{std::move(io_params), default_mock_buffer, default_mock_file};
+
+    op.markPending();
+    hipFileIOEvents_t event = op.event();
+
+    ASSERT_THROW(op.markPending(), InvalidStateTransition);
+    ASSERT_EQ(event.status, hipFilePending);
+    ASSERT_EQ(event.ret, 0u);
+    ASSERT_EQ(event.cookie, &cookie);
 }
 
 TEST_F(HipFileBatch, CreateOperationBadBuffer)
