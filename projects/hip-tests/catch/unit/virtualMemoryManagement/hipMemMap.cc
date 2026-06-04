@@ -281,6 +281,97 @@ HIP_TEST_CASE(Unit_hipMemMap_PhysicalMemory_Map2MultVMMs) {
   CTX_DESTROY();
 }
 
+/**
+ * Test Description
+ * ------------------------
+ *    - Allocate one physical handle and map it to N (>=2) different VAs.
+ *      Write a known pattern via VA #0, unmap VA #0 only, then read from
+ *      VA #1 to verify the surviving alias is still coherent. Finally, map
+ *      the same handle to a fresh VA #N and read back to prove the handle
+ *      was not released early. Stresses the shared bookkeeping helper's
+ *      cross-link teardown (must touch only the unmapped VA's slot) and
+ *      the release-only-on-success rule for hipMemUnmap.
+ * ------------------------
+ *    - unit/virtualMemoryManagement/hipMemMap.cc
+ * Test requirements
+ * ------------------------
+ *    - HIP_VERSION >= 7.0
+ */
+HIP_TEST_CASE(Unit_hipMemMap_UnmapOneAliasOfMultiAliasedHandle) {
+  size_t granularity = 0;
+  size_t buffer_size = N * sizeof(int);
+  CTX_CREATE();
+  int deviceId = 0;
+  hipDevice_t device;
+  HIP_CHECK(hipDeviceGet(&device, deviceId));
+  checkVMMSupported(device);
+  hipMemAllocationProp prop{};
+  prop.type = hipMemAllocationTypePinned;
+  prop.location.type = hipMemLocationTypeDevice;
+  prop.location.id = device;
+  HIP_CHECK(
+      hipMemGetAllocationGranularity(&granularity, &prop, hipMemAllocationGranularityMinimum));
+  REQUIRE(granularity > 0);
+  size_t size_mem = ((granularity + buffer_size - 1) / granularity) * granularity;
+
+  // Step 1: Allocate one physical handle.
+  hipMemGenericAllocationHandle_t handle;
+  HIP_CHECK(hipMemCreate(&handle, size_mem, &prop, 0));
+
+  // Reserve N (>=2) VAs and map the handle to each.
+  void* ptrA[num_buf];
+  for (int buf = 0; buf < num_buf; buf++) {
+    HIP_CHECK(hipMemAddressReserve(&ptrA[buf], size_mem, 0, 0, 0));
+    HIP_CHECK(hipMemMap(ptrA[buf], size_mem, 0, handle, 0));
+  }
+
+  hipMemAccessDesc accessDesc = {};
+  accessDesc.location.type = hipMemLocationTypeDevice;
+  accessDesc.location.id = device;
+  accessDesc.flags = hipMemAccessFlagsProtReadWrite;
+  for (int buf = 0; buf < num_buf; buf++) {
+    HIP_CHECK(hipMemSetAccess(ptrA[buf], size_mem, &accessDesc, 1));
+  }
+
+  // Step 2: write known pattern via VA #0.
+  std::vector<int> A_h(N), B_h(N);
+  for (size_t idx = 0; idx < N; idx++) {
+    A_h[idx] = static_cast<int>(idx) + 0xA5A5;
+  }
+  HIP_CHECK(hipMemcpyHtoD(reinterpret_cast<hipDeviceptr_t>(ptrA[0]), A_h.data(), buffer_size));
+
+  // Step 3: unmap VA #0 only. Handle and remaining aliases must survive.
+  HIP_CHECK(hipMemUnmap(ptrA[0], size_mem));
+
+  // Step 4: read from VA #1. Pattern must be visible.
+  std::fill(B_h.begin(), B_h.end(), initializer);
+  HIP_CHECK(hipMemcpyDtoH(B_h.data(), reinterpret_cast<hipDeviceptr_t>(ptrA[1]), buffer_size));
+  REQUIRE(true == std::equal(B_h.begin(), B_h.end(), A_h.data()));
+
+  // Step 5: handle must NOT be released early. Map it to a fresh VA #N and
+  // read back. If the handle had been incorrectly released the map would
+  // fail or the data would be garbage.
+  void* ptrFresh = nullptr;
+  HIP_CHECK(hipMemAddressReserve(&ptrFresh, size_mem, 0, 0, 0));
+  HIP_CHECK(hipMemMap(ptrFresh, size_mem, 0, handle, 0));
+  HIP_CHECK(hipMemSetAccess(ptrFresh, size_mem, &accessDesc, 1));
+  std::fill(B_h.begin(), B_h.end(), initializer);
+  HIP_CHECK(hipMemcpyDtoH(B_h.data(), reinterpret_cast<hipDeviceptr_t>(ptrFresh), buffer_size));
+  REQUIRE(true == std::equal(B_h.begin(), B_h.end(), A_h.data()));
+
+  // Cleanup: unmap surviving VAs (skip ptrA[0], already unmapped).
+  HIP_CHECK(hipMemUnmap(ptrFresh, size_mem));
+  for (int buf = 1; buf < num_buf; buf++) {
+    HIP_CHECK(hipMemUnmap(ptrA[buf], size_mem));
+  }
+  HIP_CHECK(hipMemRelease(handle));
+  HIP_CHECK(hipMemAddressFree(ptrFresh, size_mem));
+  for (int buf = 0; buf < num_buf; buf++) {
+    HIP_CHECK(hipMemAddressFree(ptrA[buf], size_mem));
+  }
+  CTX_DESTROY();
+}
+
 void physicalMemoryReuse_MultiDev (hipMemAllocationProp prop) {
   int devicecount = 0;
   HIP_CHECK(hipGetDeviceCount(&devicecount));
