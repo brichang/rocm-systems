@@ -1,11 +1,13 @@
 # Copyright (c) Advanced Micro Devices, Inc.
 # SPDX-License-Identifier:  MIT
 
+from __future__ import annotations
+
 import argparse
 import json
 import re
 from pathlib import Path
-from typing import Any, Optional, Union
+from typing import TYPE_CHECKING, Any, Optional, Union
 
 import pandas as pd
 
@@ -14,7 +16,6 @@ from utils.logger import console_debug, console_error, console_warning, demarcat
 from utils.metrics.evaluation_pipeline import eval_metric
 from utils.metrics.expression import gen_counter_list
 from utils.pattern_matching import PatternMatcherEngine
-from utils.specs import MachineSpecs
 from utils.utils_common import (
     METRIC_ID_RE,
     SUPPORTED_FIELD,
@@ -23,6 +24,11 @@ from utils.utils_common import (
     expand_placeholder_ranges,
     normalize_filter_to_str_list,
 )
+
+# MachineSpecs is only needed for type annotations in correct_sys_info().
+# Guard it under TYPE_CHECKING to break specs -> tty -> parser -> specs cycle.
+if TYPE_CHECKING:
+    from utils.specs import MachineSpecs
 
 # ------------------------------------------------------------------------------
 # Internal global definitions
