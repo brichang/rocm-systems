@@ -18,6 +18,10 @@
 
 #include <hip_test_common.hh>
 
+#include <atomic>
+#include <chrono>
+#include <thread>
+
 #include "hip_vmm_common.hh"
 
 constexpr int N = (1 << 13);
@@ -1137,6 +1141,207 @@ HIP_TEST_CASE(Unit_hipMemMap_DirectPath_NoImplicitSync) {
   HIP_CHECK(hipMemUnmap(ptr, size_mem));
   HIP_CHECK(hipMemRelease(handle));
   HIP_CHECK(hipMemAddressFree(ptr, size_mem));
+}
+
+/**
+ * PAL-direct-path test helper. PAL is the legacy CL/Windows-Pro stack;
+ * ROCm Linux builds typically have ROCCLR_ENABLE_PAL=OFF (HSA-only) and
+ * never see a PAL device at runtime. There is no HIP API attribute that
+ * directly answers "is the active backend PAL?", so we infer from the
+ * platform: PAL is only ever active on Windows AMD builds. On Linux/HSA
+ * builds (the current environment) we always return false so the PAL
+ * tests skip cleanly. The test bodies still need to be WRITTEN -- they
+ * exist for the eventual PAL CI even if they cannot run here.
+ */
+static bool palDeviceDetected() {
+#if defined(_WIN32) && defined(HT_AMD)
+  // On Windows-AMD, the AMD HIP runtime may be built atop PAL. There is
+  // no public attribute distinguishing PAL from a hypothetical Windows
+  // HSA build, so we conservatively assume Windows-AMD == PAL. False
+  // positives here mean we attempt to run the test against a non-PAL
+  // device, which still validates HIP-level invariants.
+  return true;
+#else
+  return false;
+#endif
+}
+
+/**
+ * Test Description
+ * ------------------------
+ *    - PAL-direct-path TDD test for the new pal::Device::virtualMap
+ * (Commit 3 of hipMemMap refactor). Functional equivalence guard:
+ * reserve VA, create physical handle, hipMemMap, set access, write/read
+ * via HtoD/DtoH and a kernel, unmap, release, free. Same body shape as
+ * Unit_hipMemMap_DirectPath_BasicMapUnmapRoundTrip but pinned to PAL.
+ * Currently exercises the old PAL VirtualMapCommand path (Commits 4/5
+ * have not landed yet) and is expected to PASS on PAL hardware. After
+ * Commits 3/4/5 land, hipMemMap routes through pal::Device::virtualMap
+ * directly (which itself reuses NullStream's VirtualGPU under the
+ * execution() lock) and the test must continue to PASS. Skipped when
+ * no PAL backend is present -- which is the case in HSA-only ROCm
+ * Linux builds (ROCCLR_ENABLE_PAL=OFF).
+ * ------------------------
+ *    - unit/virtualMemoryManagement/hipMemMap.cc
+ * Test requirements
+ * ------------------------
+ *    - HIP_VERSION >= 6.1
+ *    - PAL backend (Windows AMD-Pro stack)
+ */
+HIP_TEST_CASE(Unit_hipMemMap_PalDirectPath_BasicRoundTrip) {
+  if (!palDeviceDetected()) {
+    HIP_SKIP_TEST(
+        "Skipping: PAL device not present in this build "
+        "(ROCCLR_ENABLE_PAL=OFF on HSA-only Linux). Test exists for "
+        "PAL CI and documents the contract.");
+    return;
+  }
+  HIP_CHECK(hipFree(0));
+  size_t granularity = 0;
+  size_t buffer_size = N * sizeof(int);
+  int deviceId = 0;
+  hipDevice_t device;
+  HIP_CHECK(hipDeviceGet(&device, deviceId));
+  checkVMMSupported(device);
+  hipMemAllocationProp prop{};
+  prop.type = hipMemAllocationTypePinned;
+  prop.location.type = hipMemLocationTypeDevice;
+  prop.location.id = device;
+  HIP_CHECK(
+      hipMemGetAllocationGranularity(&granularity, &prop, hipMemAllocationGranularityMinimum));
+  REQUIRE(granularity > 0);
+  size_t size_mem = ((granularity + buffer_size - 1) / granularity) * granularity;
+
+  std::vector<int> A_h(N), B_h(N), C_h(N);
+  for (size_t idx = 0; idx < N; ++idx) {
+    A_h[idx] = static_cast<int>(idx);
+    C_h[idx] = static_cast<int>(idx * idx);
+  }
+
+  hipMemGenericAllocationHandle_t handle;
+  void* ptr = nullptr;
+  HIP_CHECK(hipMemCreate(&handle, size_mem, &prop, 0));
+  HIP_CHECK(hipMemAddressReserve(&ptr, size_mem, 0, 0, 0));
+
+  // The PAL direct path under test.
+  HIP_CHECK(hipMemMap(ptr, size_mem, 0, handle, 0));
+
+  hipMemAccessDesc accessDesc{};
+  accessDesc.location.type = hipMemLocationTypeDevice;
+  accessDesc.location.id = device;
+  accessDesc.flags = hipMemAccessFlagsProtReadWrite;
+  HIP_CHECK(hipMemSetAccess(ptr, size_mem, &accessDesc, 1));
+
+  std::fill(B_h.begin(), B_h.end(), initializer);
+  HIP_CHECK(hipMemcpyHtoD(reinterpret_cast<hipDeviceptr_t>(ptr), A_h.data(), buffer_size));
+  HIP_CHECK(hipMemcpyDtoH(B_h.data(), reinterpret_cast<hipDeviceptr_t>(ptr), buffer_size));
+  REQUIRE(std::equal(B_h.begin(), B_h.end(), A_h.data()));
+
+  square_kernel<<<dim3(N / threadsPerBlk), dim3(threadsPerBlk), 0, 0>>>(
+      reinterpret_cast<int*>(ptr));
+  HIP_CHECK(hipStreamSynchronize(0));
+  HIP_CHECK(hipMemcpyDtoH(B_h.data(), reinterpret_cast<hipDeviceptr_t>(ptr), buffer_size));
+  REQUIRE(std::equal(B_h.begin(), B_h.end(), C_h.data()));
+
+  // Cross-link bookkeeping must be wired by the PAL direct path too.
+  hipMemGenericAllocationHandle_t retrieved = nullptr;
+  HIP_CHECK(hipMemRetainAllocationHandle(&retrieved, ptr));
+  REQUIRE(retrieved == handle);
+  HIP_CHECK(hipMemRelease(retrieved));
+
+  HIP_CHECK(hipMemUnmap(ptr, size_mem));
+  HIP_CHECK(hipMemRelease(handle));
+  HIP_CHECK(hipMemAddressFree(ptr, size_mem));
+}
+
+/**
+ * Test Description
+ * ------------------------
+ *    - PAL-direct-path TDD test for the execution() locking story:
+ * spawn N threads that each reserve disjoint VA ranges, hipMemMap,
+ * hipMemUnmap, and release in a loop. With PAL's NullStream
+ * execution() lock taken inside virtualMap/virtualUnmap, all
+ * threads must make forward progress and the full test must finish
+ * within a generous wall-clock bound -- no deadlock, no livelock,
+ * no starvation. Currently exercises the existing PAL
+ * VirtualMapCommand path which also serializes on execution(); the
+ * test is expected to PASS today on PAL hardware. After Commit 3
+ * lands, the same property must hold for the direct path. Skipped
+ * cleanly when no PAL device is present.
+ *
+ *  Black-box gap: this test cannot prove that the lock is held only
+ * on the local device (the design says "no peer-device WaitForIdle").
+ * That property is internal and documented as untestable from a
+ * black-box harness.
+ * ------------------------
+ *    - unit/virtualMemoryManagement/hipMemMap.cc
+ * Test requirements
+ * ------------------------
+ *    - HIP_VERSION >= 6.1
+ *    - PAL backend (Windows AMD-Pro stack)
+ */
+HIP_TEST_CASE(Unit_hipMemMap_PalDirectPath_ConcurrentDisjointMapsNoDeadlock) {
+  if (!palDeviceDetected()) {
+    HIP_SKIP_TEST(
+        "Skipping: PAL device not present in this build "
+        "(ROCCLR_ENABLE_PAL=OFF on HSA-only Linux). Test exists for "
+        "PAL CI and documents the contract.");
+    return;
+  }
+  HIP_CHECK(hipFree(0));
+  size_t granularity = 0;
+  int deviceId = 0;
+  hipDevice_t device;
+  HIP_CHECK(hipDeviceGet(&device, deviceId));
+  checkVMMSupported(device);
+  hipMemAllocationProp prop{};
+  prop.type = hipMemAllocationTypePinned;
+  prop.location.type = hipMemLocationTypeDevice;
+  prop.location.id = device;
+  HIP_CHECK(
+      hipMemGetAllocationGranularity(&granularity, &prop, hipMemAllocationGranularityMinimum));
+  REQUIRE(granularity > 0);
+  const size_t size_mem = granularity;
+  constexpr int kThreads = 4;
+  constexpr int kIters = 8;
+
+  std::atomic<bool> failed{false};
+  auto worker = [&](int tid) {
+    for (int i = 0; i < kIters && !failed.load(); ++i) {
+      hipMemGenericAllocationHandle_t h;
+      void* p = nullptr;
+      if (hipMemCreate(&h, size_mem, &prop, 0) != hipSuccess) { failed = true; return; }
+      if (hipMemAddressReserve(&p, size_mem, 0, 0, 0) != hipSuccess) {
+        (void)hipMemRelease(h); failed = true; return;
+      }
+      if (hipMemMap(p, size_mem, 0, h, 0) != hipSuccess) {
+        (void)hipMemAddressFree(p, size_mem); (void)hipMemRelease(h); failed = true; return;
+      }
+      hipMemAccessDesc d{};
+      d.location.type = hipMemLocationTypeDevice;
+      d.location.id = device;
+      d.flags = hipMemAccessFlagsProtReadWrite;
+      (void)hipMemSetAccess(p, size_mem, &d, 1);
+      if (hipMemUnmap(p, size_mem) != hipSuccess) { failed = true; return; }
+      (void)hipMemRelease(h);
+      (void)hipMemAddressFree(p, size_mem);
+      (void)tid;
+    }
+  };
+
+  // Hard upper bound: 60s. A deadlocked execution() lock would never
+  // complete; a heavily serialized but live path completes in well
+  // under this.
+  auto t0 = std::chrono::steady_clock::now();
+  std::vector<std::thread> threads;
+  threads.reserve(kThreads);
+  for (int i = 0; i < kThreads; ++i) threads.emplace_back(worker, i);
+  for (auto& t : threads) t.join();
+  auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                     std::chrono::steady_clock::now() - t0)
+                     .count();
+  REQUIRE_FALSE(failed.load());
+  REQUIRE(elapsed < 60);
 }
 
 /**
