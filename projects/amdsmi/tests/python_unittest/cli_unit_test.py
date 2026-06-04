@@ -869,6 +869,9 @@ class TestAmdSmiCli(unittest.TestCase):
             ("amd-smi ras --cper --severity INVALID", self.FAIL),
             ("amd-smi ras --afid", self.FAIL),
             ("amd-smi ras --afid INVALID", self.FAIL),
+            # --decode is not a valid flag
+            ("amd-smi ras --decode", self.FAIL),
+            ("amd-smi ras --decode --cper-file /tmp/nonexistent.cper", self.FAIL),
             # Test invalid watch order
             ("amd-smi monitor --interval 2 --watch 1", self.FAIL),
             ("amd-smi monitor --watch_time 2 --watch 1", self.FAIL),

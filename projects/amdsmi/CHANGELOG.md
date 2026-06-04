@@ -8,6 +8,11 @@ Full documentation for amd_smi_lib is available at [https://rocm.docs.amd.com/pr
 
 ### Added
 
+- **Added `--folder` support to `amd-smi ras --afid`**.
+  - `amd-smi ras --afid --folder <DIR>` now decodes every `*.cper` in an existing directory and prints a `file_name | list of afids` table (or a JSON array under `--json`).
+  - `--cper-file` and `--folder` are mutually exclusive under `--afid`; exactly one must be supplied.
+  - Unlike the `--cper --folder` write path, the directory must already exist and contain at least one `.cper` file (it is not auto-created for the AFID read path).
+
 - **Added IFoE/UALoE fabric telemetry and topology support**.  
   - New `amd-smi fabric` CLI subcommand with `--topology` / `-t` and `--info` / `-i` flags for querying fabric (UALoE) information.
   - New C APIs: `amdsmi_get_fabric_telemetry_data()` and `amdsmi_get_gpu_fabric_info()`.
@@ -31,6 +36,11 @@ Full documentation for amd_smi_lib is available at [https://rocm.docs.amd.com/pr
 
 - **Added `AMDSMI_LINK_TYPE_NUMA` and `AMDSMI_LINK_TYPE_XNUMA` to `amdsmi_link_type_t` enum**.  
   - Added the new types to `amdsmi_link_types` as part of support for NICs
+
+### Removed
+
+- **Removed dead `--decode` flag from `amd-smi ras`**.
+  - The flag was non-functional and silently accepted; out-of-band CPER decoding is already available via `amd-smi ras --afid --cper-file <path>` (or the new `--afid --folder <DIR>`), neither of which requires driver/GPU access.
 
 ### Resolved Issues
 
