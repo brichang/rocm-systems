@@ -67,6 +67,36 @@ HIP_TEST_CASE(Unit_hipMemUnmap_negative) {
     REQUIRE(hipMemUnmap(ptrA, (size_mem - 1)) == hipErrorInvalidValue);
   }
 
+  // Validation-gating coverage (hipMemMap_refactor.md test #1) for the
+  // new direct-path hipMemUnmap. Both of these paths exercise the
+  // bool->hipErrorInvalidValue translation: the second call has no
+  // MemObjMap entry for the VA, so ValidateSubBufferCoverage's
+  // FindMemObj lookup returns nullptr and the validator hands back
+  // hipErrorInvalidValue (the same error code that the sub-buffer-loop
+  // backend-false branch produces). Pins the abort-on-first-error
+  // semantics from the user's perspective.
+  SECTION("double unmap of mapped VA") {
+    HIP_CHECK(hipMemUnmap(ptrA, size_mem));
+    // Second call: the MemObjMap entry is gone, so the validator now
+    // rejects the lookup. Must report hipErrorInvalidValue, not crash
+    // and not silently return success.
+    REQUIRE(hipMemUnmap(ptrA, size_mem) == hipErrorInvalidValue);
+    // Re-map so the common-path cleanup at the end of the test still
+    // finds a live mapping to tear down.
+    HIP_CHECK(hipMemMap(ptrA, size_mem, 0, handle, 0));
+  }
+
+  SECTION("unmap of reserved-but-never-mapped VA") {
+    void* unmappedVa = nullptr;
+    HIP_CHECK(hipMemAddressReserve(&unmappedVa, size_mem, 0, 0, 0));
+    // No hipMemMap has been issued against unmappedVa, so no entry
+    // exists in MemObjMap. Validation must reject with
+    // hipErrorInvalidValue rather than proceeding into the sub-buffer
+    // loop.
+    REQUIRE(hipMemUnmap(unmappedVa, size_mem) == hipErrorInvalidValue);
+    HIP_CHECK(hipMemAddressFree(unmappedVa, size_mem));
+  }
+
   HIP_CHECK(hipMemUnmap(ptrA, size_mem));
   HIP_CHECK(hipMemAddressFree(ptrA, size_mem));
   HIP_CHECK(hipMemRelease(handle));
