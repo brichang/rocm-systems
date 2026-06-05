@@ -7,7 +7,7 @@ import argparse
 import json
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Optional, Union
+from typing import TYPE_CHECKING, Any, Optional
 
 import pandas as pd
 
@@ -401,8 +401,8 @@ def apply_dispatch_filter(df: pd.DataFrame, workload: schema.Workload) -> pd.Dat
 
 
 def find_key_recursively(
-    data: Union[dict, list], search_key: str
-) -> Union[list, dict, None]:
+    data: dict | list, search_key: str
+) -> list | dict | None:
     """
     Recursively search for the search_key in the given data
     (which can be a dict or list).
@@ -424,7 +424,7 @@ def find_key_recursively(
     return None  # Return None if the key was not found
 
 
-def search_key_in_json(file_path: Path, search_key: str) -> Union[list, dict, None]:
+def search_key_in_json(file_path: Path, search_key: str) -> list | dict | None:
     # FIXME:
     #   Load the entire JSON into memory.
     #   Should not use for large file.
@@ -437,7 +437,7 @@ def search_key_in_json(file_path: Path, search_key: str) -> Union[list, dict, No
 
 
 def search_pc_sampling_record(
-    records: Union[list[dict], dict],
+    records: list[dict] | dict,
 ) -> Optional[list[tuple]]:
     """
     Search PC sampling records.
